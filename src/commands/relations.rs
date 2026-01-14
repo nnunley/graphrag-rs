@@ -57,35 +57,39 @@ impl PluginCommand for GraphRagRelations {
             }
         }
 
-        // Get entity names (simple approach - query each)
-        let get_entity_name = |id: i64| -> String {
-            db.list_entities(&store_name)
-                .ok()
-                .and_then(|entities| entities.into_iter().find(|e| e.id == id))
-                .map(|e| e.name)
-                .unwrap_or_else(|| format!("entity_{}", id))
+        // Get all entities for lookup
+        let all_entities = db.list_entities(&store_name).unwrap_or_default();
+
+        let get_entity = |id: i64| -> (String, Option<String>) {
+            all_entities.iter()
+                .find(|e| e.id == id)
+                .map(|e| (e.name.clone(), e.entity_type.clone()))
+                .unwrap_or_else(|| (format!("entity_{}", id), None))
         };
 
         let values: Vec<Value> = relations
             .into_iter()
             .map(|rel| {
-                let head_name = get_entity_name(rel.head_id);
-                let tail_name = get_entity_name(rel.tail_id);
+                let (head_name, head_type) = get_entity(rel.head_id);
+                let (tail_name, tail_type) = get_entity(rel.tail_id);
 
                 // Determine direction relative to queried entity
-                let (direction, other_entity) = if rel.head_id == entity.id {
-                    ("outgoing", tail_name)
+                let (direction, other_entity, other_type) = if rel.head_id == entity.id {
+                    ("outgoing", tail_name.clone(), tail_type.clone())
                 } else {
-                    ("incoming", head_name)
+                    ("incoming", head_name.clone(), head_type.clone())
                 };
 
                 Value::record(
                     nu_protocol::record! {
                         "relation" => Value::string(&rel.relation, span),
                         "direction" => Value::string(direction, span),
-                        "head" => Value::string(get_entity_name(rel.head_id), span),
-                        "tail" => Value::string(get_entity_name(rel.tail_id), span),
+                        "head" => Value::string(&head_name, span),
+                        "head_type" => head_type.map(|t| Value::string(t, span)).unwrap_or(Value::nothing(span)),
+                        "tail" => Value::string(&tail_name, span),
+                        "tail_type" => tail_type.map(|t| Value::string(t, span)).unwrap_or(Value::nothing(span)),
                         "other_entity" => Value::string(other_entity, span),
+                        "other_type" => other_type.map(|t| Value::string(t, span)).unwrap_or(Value::nothing(span)),
                     },
                     span,
                 )
