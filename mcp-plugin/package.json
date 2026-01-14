@@ -1,0 +1,19 @@
+{
+  "name": "graphrag-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for GraphRAG knowledge graph memory",
+  "type": "module",
+  "main": "mcp-server.js",
+  "bin": {
+    "graphrag-mcp": "./mcp-server.js"
+  },
+  "scripts": {
+    "start": "node mcp-server.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

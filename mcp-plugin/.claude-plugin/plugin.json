@@ -1,0 +1,17 @@
+{
+  "name": "graphrag",
+  "version": "0.1.0",
+  "description": "Knowledge graph memory with semantic search. Combines HNSW vector search with entity-relation extraction and community detection.",
+  "author": {
+    "name": "ndn"
+  },
+  "license": "MIT",
+  "keywords": ["memory", "knowledge-graph", "semantic-search", "graphrag", "entities", "communities"],
+  "mcpServers": {
+    "graphrag": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/mcp-server.js"],
+      "env": {}
+    }
+  }
+}
