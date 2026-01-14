@@ -56,6 +56,28 @@ pub struct CommunityHierarchy {
     pub modularity: f64,
 }
 
+/// A flat community for storage (with hierarchy info)
+#[derive(Debug, Clone)]
+pub struct FlatCommunity {
+    /// Node IDs in this community
+    pub nodes: Vec<i64>,
+    /// Hierarchy level (0 = top level)
+    pub level: i32,
+    /// Index of parent community in the flat list (None for top-level)
+    pub parent_index: Option<usize>,
+    /// Modularity at this level
+    pub modularity: f64,
+}
+
+/// Result of hierarchical community detection
+#[derive(Debug)]
+pub struct HierarchicalResult {
+    /// Flat list of all communities at all levels
+    pub communities: Vec<FlatCommunity>,
+    /// Number of levels in the hierarchy
+    pub depth: i32,
+}
+
 /// Graph structure for community detection
 /// Nodes are i64 (entity IDs), edges have f64 weights
 pub struct CommunityGraph {
@@ -416,6 +438,118 @@ impl CommunityGraph {
                 Community::Leaf(node_ids)
             })
             .collect()
+    }
+
+    /// Run hierarchical Leiden - recursively partition large communities
+    ///
+    /// # Arguments
+    /// * `max_iterations` - Max iterations per level
+    /// * `tolerance` - Convergence tolerance
+    /// * `min_community_size` - Minimum size to attempt further partitioning
+    /// * `max_levels` - Maximum depth of hierarchy (None = unlimited)
+    pub fn leiden_hierarchical(
+        &self,
+        max_iterations: Option<usize>,
+        tolerance: f64,
+        min_community_size: usize,
+        max_levels: Option<i32>,
+    ) -> HierarchicalResult {
+        let mut all_communities: Vec<FlatCommunity> = Vec::new();
+        let max_depth = max_levels.unwrap_or(10);
+
+        // First pass: get top-level communities
+        let top_result = self.leiden(max_iterations, tolerance);
+
+        if top_result.communities.is_empty() {
+            return HierarchicalResult {
+                communities: vec![],
+                depth: 0,
+            };
+        }
+
+        // Queue: (community_nodes, level, parent_index)
+        let mut queue: VecDeque<(Vec<i64>, i32, Option<usize>)> = VecDeque::new();
+
+        // Add top-level communities to queue
+        for community in &top_result.communities {
+            let nodes = community.collect_nodes();
+            queue.push_back((nodes, 0, None));
+        }
+
+        let mut current_depth = 0;
+
+        while let Some((nodes, level, parent_idx)) = queue.pop_front() {
+            current_depth = current_depth.max(level);
+
+            // Store this community
+            let community_index = all_communities.len();
+            all_communities.push(FlatCommunity {
+                nodes: nodes.clone(),
+                level,
+                parent_index: parent_idx,
+                modularity: if level == 0 { top_result.modularity } else { 0.0 },
+            });
+
+            // Check if we should try to partition further
+            if nodes.len() < min_community_size || level >= max_depth {
+                continue;
+            }
+
+            // Build subgraph for this community
+            let subgraph = self.build_subgraph(&nodes);
+
+            if subgraph.node_count() < min_community_size {
+                continue;
+            }
+
+            // Run Leiden on subgraph
+            let sub_result = subgraph.leiden(max_iterations, tolerance);
+
+            // Only use sub-partitioning if it found multiple communities
+            if sub_result.communities.len() > 1 {
+                // Update the modularity for this level
+                all_communities[community_index].modularity = sub_result.modularity;
+
+                // Add sub-communities to queue
+                for sub_comm in &sub_result.communities {
+                    let sub_nodes = sub_comm.collect_nodes();
+                    if sub_nodes.len() >= 2 {
+                        queue.push_back((sub_nodes, level + 1, Some(community_index)));
+                    }
+                }
+            }
+        }
+
+        HierarchicalResult {
+            communities: all_communities,
+            depth: current_depth + 1,
+        }
+    }
+
+    /// Build a subgraph containing only the specified nodes
+    fn build_subgraph(&self, node_ids: &[i64]) -> CommunityGraph {
+        let node_set: HashSet<i64> = node_ids.iter().copied().collect();
+        let mut subgraph = CommunityGraph::new();
+
+        // Add nodes
+        for &node_id in node_ids {
+            subgraph.add_node(node_id);
+        }
+
+        // Add edges between nodes in the subgraph
+        for &node_id in node_ids {
+            if let Some(&idx) = self.node_to_idx.get(&node_id) {
+                for &(neighbor_idx, weight) in &self.neighbors[idx] {
+                    let neighbor_id = self.nodes[neighbor_idx];
+                    // Only add if both endpoints are in the subgraph and avoid duplicates
+                    if node_set.contains(&neighbor_id) && node_id < neighbor_id {
+                        subgraph.add_edge(node_id, neighbor_id, weight);
+                    }
+                }
+            }
+        }
+
+        subgraph
     }
 }
 

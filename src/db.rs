@@ -61,6 +61,7 @@ pub struct CommunityRecord {
     pub id: i64,
     pub store: String,
     pub level: i32,
+    pub parent_id: Option<i64>,
     pub summary: Option<String>,
     pub modularity: Option<f64>,
     pub created_at: String,
@@ -80,7 +81,33 @@ impl Database {
         let conn = Connection::open(path)?;
         let db = Self { conn };
         db.init_schema()?;
+        db.migrate_schema()?;
         Ok(db)
+    }
+
+    /// Run schema migrations for existing databases
+    fn migrate_schema(&self) -> Result<(), GraphRagError> {
+        // Check if communities table has parent_id column
+        let has_parent_id: bool = self.conn.query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('communities') WHERE name = 'parent_id'",
+            [],
+            |row| row.get(0),
+        ).unwrap_or(false);
+
+        if !has_parent_id {
+            // Add parent_id column to existing communities table
+            self.conn.execute(
+                "ALTER TABLE communities ADD COLUMN parent_id INTEGER REFERENCES communities(id) ON DELETE CASCADE",
+                [],
+            )?;
+            // Create index
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_communities_parent ON communities(parent_id)",
+                [],
+            )?;
+        }
+
+        Ok(())
     }
 
     fn init_schema(&self) -> Result<(), GraphRagError> {
@@ -521,10 +548,11 @@ impl Database {
         store: &str,
         level: i32,
         modularity: f64,
+        parent_id: Option<i64>,
     ) -> Result<i64, GraphRagError> {
         self.conn.execute(
-            "INSERT INTO communities (store, level, modularity) VALUES (?1, ?2, ?3)",
-            params![store, level, modularity],
+            "INSERT INTO communities (store, level, modularity, parent_id) VALUES (?1, ?2, ?3, ?4)",
+            params![store, level, modularity, parent_id],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
@@ -552,7 +580,7 @@ impl Database {
         let _ = self.get_store(store)?;
 
         let mut stmt = self.conn.prepare(
-            "SELECT id, store, level, summary, modularity, created_at FROM communities WHERE store = ?1 ORDER BY id",
+            "SELECT id, store, level, parent_id, summary, modularity, created_at FROM communities WHERE store = ?1 ORDER BY level, id",
         )?;
 
         let communities = stmt
@@ -561,9 +589,33 @@ impl Database {
                     id: row.get(0)?,
                     store: row.get(1)?,
                     level: row.get(2)?,
-                    summary: row.get(3)?,
-                    modularity: row.get(4)?,
-                    created_at: row.get(5)?,
+                    parent_id: row.get(3)?,
+                    summary: row.get(4)?,
+                    modularity: row.get(5)?,
+                    created_at: row.get(6)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(communities)
+    }
+
+    /// Get child communities of a parent
+    pub fn get_child_communities(&self, parent_id: i64) -> Result<Vec<CommunityRecord>, GraphRagError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, store, level, parent_id, summary, modularity, created_at FROM communities WHERE parent_id = ?1 ORDER BY id",
+        )?;
+
+        let communities = stmt
+            .query_map(params![parent_id], |row| {
+                Ok(CommunityRecord {
+                    id: row.get(0)?,
+                    store: row.get(1)?,
+                    level: row.get(2)?,
+                    parent_id: row.get(3)?,
+                    summary: row.get(4)?,
+                    modularity: row.get(5)?,
+                    created_at: row.get(6)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -596,31 +648,31 @@ impl Database {
         Ok(entities)
     }
 
-    /// Get community for an entity
-    pub fn get_entity_community(&self, entity_id: i64) -> Result<Option<CommunityRecord>, GraphRagError> {
-        let result = self.conn.query_row(
-            "SELECT c.id, c.store, c.level, c.summary, c.modularity, c.created_at
+    /// Get communities for an entity (can be multiple due to hierarchy)
+    pub fn get_entity_communities(&self, entity_id: i64) -> Result<Vec<CommunityRecord>, GraphRagError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT c.id, c.store, c.level, c.parent_id, c.summary, c.modularity, c.created_at
              FROM communities c
              JOIN entity_communities ec ON c.id = ec.community_id
-             WHERE ec.entity_id = ?1",
-            params![entity_id],
-            |row| {
+             WHERE ec.entity_id = ?1
+             ORDER BY c.level",
+        )?;
+
+        let communities = stmt
+            .query_map(params![entity_id], |row| {
                 Ok(CommunityRecord {
                     id: row.get(0)?,
                     store: row.get(1)?,
                     level: row.get(2)?,
-                    summary: row.get(3)?,
-                    modularity: row.get(4)?,
-                    created_at: row.get(5)?,
+                    parent_id: row.get(3)?,
+                    summary: row.get(4)?,
+                    modularity: row.get(5)?,
+                    created_at: row.get(6)?,
                 })
-            },
-        );
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
 
-        match result {
-            Ok(record) => Ok(Some(record)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(GraphRagError::Database(e)),
-        }
+        Ok(communities)
     }
 
 }

@@ -64,10 +64,19 @@ impl PluginCommand for GraphRagGetCommunity {
             })
             .collect();
 
+        // Get child communities if any
+        let children = db.get_child_communities(community_id)
+            .map_err(|e| e.into_labeled_error(span))?;
+        let child_ids: Vec<Value> = children.iter().map(|c| Value::int(c.id, span)).collect();
+
         let result = Value::record(
             nu_protocol::record! {
                 "community_id" => Value::int(community_id, span),
                 "level" => community.map(|c| Value::int(c.level as i64, span)).unwrap_or(Value::nothing(span)),
+                "parent_id" => community.and_then(|c| c.parent_id)
+                    .map(|p| Value::int(p, span))
+                    .unwrap_or(Value::nothing(span)),
+                "children" => Value::list(child_ids, span),
                 "summary" => community.and_then(|c| c.summary.as_ref())
                     .map(|s| Value::string(s, span))
                     .unwrap_or(Value::nothing(span)),
@@ -184,6 +193,9 @@ impl PluginCommand for GraphRagListCommunities {
                     nu_protocol::record! {
                         "id" => Value::int(c.id, span),
                         "level" => Value::int(c.level as i64, span),
+                        "parent_id" => c.parent_id
+                            .map(|p| Value::int(p, span))
+                            .unwrap_or(Value::nothing(span)),
                         "size" => Value::int(entities.len() as i64, span),
                         "has_summary" => Value::bool(c.summary.is_some(), span),
                         "summary" => c.summary.as_ref()
