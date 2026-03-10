@@ -1,0 +1,17 @@
+[package]
+name = "nu_plugin_graphrag"
+version = "0.1.0"
+edition = "2024"
+description = "Nushell plugin for GraphRAG - knowledge graph + HNSW vector search"
+license = "MIT"
+
+[[bin]]
+name = "nu_plugin_graphrag"
+path = "src/main.rs"
+
+[dependencies]
+graphrag-core = { path = "../graphrag-core" }
+nu-plugin = "0.109"
+nu-protocol = "0.109"
+serde_json = "1.0"
+dirs = "5.0"

@@ -1,6 +1,6 @@
-# nu_plugin_graphrag
+# graphrag-rs
 
-A Nushell plugin combining HNSW vector search with knowledge graph storage for GraphRAG-style retrieval.
+A Rust workspace combining HNSW vector search with knowledge graph storage for GraphRAG-style retrieval. Provides both a Nushell plugin and an MCP server.
 
 ## Features
 
@@ -87,7 +87,7 @@ graphrag update-summary 1 "These entities relate to..."
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                    nu_plugin_graphrag                    │
+│                        graphrag-rs                       │
 ├─────────────────────────────────────────────────────────┤
 │  HNSW Index (usearch)     │  SQLite Database            │
 │  - Fast ANN search        │  - stores, chunks           │

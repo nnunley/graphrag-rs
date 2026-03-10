@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "graphrag": {
+      "command": "/Users/ndn/nu_libs/graphrag-rs/target/release/graphrag-mcp",
+      "args": []
+    }
+  }
+}
