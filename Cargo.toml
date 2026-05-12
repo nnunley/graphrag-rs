@@ -4,6 +4,7 @@ members = [
     "graphrag-core",
     "graphrag-nushell",
     "graphrag-mcp",
+    "graphrag-cli",
 ]
 
 [workspace.package]
