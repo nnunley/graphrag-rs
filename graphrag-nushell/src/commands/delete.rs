@@ -1,6 +1,6 @@
-use graphrag_core::Database;
-use crate::error_ext::GraphRagErrorExt;
 use crate::GraphRagPlugin;
+use crate::error_ext::GraphRagErrorExt;
+use graphrag_core::Database;
 use nu_plugin::{EngineInterface, EvaluatedCall, PluginCommand};
 use nu_protocol::{Category, PipelineData, Signature, SyntaxShape, Type, Value};
 
@@ -34,8 +34,7 @@ impl PluginCommand for GraphRagDelete {
         let name: String = call.req(0)?;
         let span = call.head;
 
-        let db = Database::open(&plugin.db_path)
-            .map_err(|e| e.into_labeled_error(span))?;
+        let db = Database::open(&plugin.db_path).map_err(|e| e.into_labeled_error(span))?;
 
         db.delete_store(&name)
             .map_err(|e| e.into_labeled_error(span))?;

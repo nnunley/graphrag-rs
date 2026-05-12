@@ -91,8 +91,8 @@ impl Embedder {
             options = options.with_cache_dir(cache_dir.clone());
         }
 
-        let model = TextEmbedding::try_new(options)
-            .map_err(|e| GraphRagError::Embedding(e.to_string()))?;
+        let model =
+            TextEmbedding::try_new(options).map_err(|e| GraphRagError::Embedding(e.to_string()))?;
 
         Ok(Self { model, config })
     }
@@ -137,11 +137,14 @@ impl Embedder {
 
     /// Embed a single text without chunking
     fn embed_single(&self, text: &str) -> Result<Vec<f32>, GraphRagError> {
-        let embeddings = self.model
+        let embeddings = self
+            .model
             .embed(vec![text], None)
             .map_err(|e| GraphRagError::Embedding(e.to_string()))?;
 
-        embeddings.into_iter().next()
+        embeddings
+            .into_iter()
+            .next()
             .ok_or_else(|| GraphRagError::Embedding("No embedding returned".to_string()))
     }
 
@@ -158,7 +161,8 @@ impl Embedder {
 
         // Embed all chunks
         let chunk_refs: Vec<&str> = chunks.iter().map(|s| s.as_str()).collect();
-        let embeddings = self.model
+        let embeddings = self
+            .model
             .embed(chunk_refs, None)
             .map_err(|e| GraphRagError::Embedding(e.to_string()))?;
 
@@ -202,17 +206,17 @@ fn split_with_overlap(text: &str, max_chars: usize, overlap: usize) -> Vec<Strin
 /// Truncate text at a sentence or word boundary
 fn truncate_at_boundary(text: &str) -> String {
     // Try sentence boundary first
-    if let Some(pos) = text.rfind(|c| c == '.' || c == '!' || c == '?') {
-        if pos > text.len() / 2 {
-            return text[..=pos].to_string();
-        }
+    if let Some(pos) = text.rfind(['.', '!', '?'])
+        && pos > text.len() / 2
+    {
+        return text[..=pos].to_string();
     }
 
     // Fall back to word boundary
-    if let Some(pos) = text.rfind(char::is_whitespace) {
-        if pos > text.len() / 2 {
-            return text[..pos].to_string();
-        }
+    if let Some(pos) = text.rfind(char::is_whitespace)
+        && pos > text.len() / 2
+    {
+        return text[..pos].to_string();
     }
 
     text.to_string()
@@ -267,10 +271,7 @@ mod tests {
 
     #[test]
     fn test_mean_pool() {
-        let embeddings = vec![
-            vec![1.0, 0.0, 0.0],
-            vec![0.0, 1.0, 0.0],
-        ];
+        let embeddings = vec![vec![1.0, 0.0, 0.0], vec![0.0, 1.0, 0.0]];
         let pooled = mean_pool(&embeddings);
         assert_eq!(pooled.len(), 3);
         // Should be normalized

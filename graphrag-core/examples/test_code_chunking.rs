@@ -2,7 +2,7 @@
 //!
 //! Run with: cargo run --example test_code_chunking --features code
 
-use graphrag_core::{chunk_code, CodeChunkerConfig, CodeLanguage};
+use graphrag_core::{CodeChunkerConfig, CodeLanguage, chunk_code};
 
 fn main() {
     let code = r#"

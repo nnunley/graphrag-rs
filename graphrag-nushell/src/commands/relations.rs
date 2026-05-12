@@ -1,6 +1,6 @@
-use graphrag_core::Database;
-use crate::error_ext::GraphRagErrorExt;
 use crate::GraphRagPlugin;
+use crate::error_ext::GraphRagErrorExt;
+use graphrag_core::Database;
 use nu_plugin::{EngineInterface, EvaluatedCall, PluginCommand};
 use nu_protocol::{Category, PipelineData, Signature, SyntaxShape, Type, Value};
 
@@ -36,15 +36,16 @@ impl PluginCommand for GraphRagRelations {
         let entity_name: String = call.req(1)?;
         let span = call.head;
 
-        let db = Database::open(&plugin.db_path)
-            .map_err(|e| e.into_labeled_error(span))?;
+        let db = Database::open(&plugin.db_path).map_err(|e| e.into_labeled_error(span))?;
 
         // Get entity by name
-        let entity = db.get_entity_by_name(&store_name, &entity_name)
+        let entity = db
+            .get_entity_by_name(&store_name, &entity_name)
             .map_err(|e| e.into_labeled_error(span))?;
 
         // Get relations
-        let relations = db.get_relations_for_entity(entity.id)
+        let relations = db
+            .get_relations_for_entity(entity.id)
             .map_err(|e| e.into_labeled_error(span))?;
 
         // Get all entity IDs we need to look up
@@ -62,7 +63,8 @@ impl PluginCommand for GraphRagRelations {
         let all_entities = db.list_entities(&store_name).unwrap_or_default();
 
         let get_entity = |id: i64| -> (String, Option<String>) {
-            all_entities.iter()
+            all_entities
+                .iter()
                 .find(|e| e.id == id)
                 .map(|e| (e.name.clone(), e.entity_type.clone()))
                 .unwrap_or_else(|| (format!("entity_{}", id), None))

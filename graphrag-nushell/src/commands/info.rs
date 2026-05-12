@@ -30,7 +30,9 @@ impl PluginCommand for GraphRagInfo {
     ) -> Result<PipelineData, nu_protocol::LabeledError> {
         let span = call.head;
 
-        let data_dir = plugin.db_path.parent()
+        let data_dir = plugin
+            .db_path
+            .parent()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_default();
 

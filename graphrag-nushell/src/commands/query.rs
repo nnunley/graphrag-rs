@@ -1,7 +1,7 @@
-use graphrag_core::Database;
-use crate::error_ext::GraphRagErrorExt;
-use graphrag_core::HnswIndex;
 use crate::GraphRagPlugin;
+use crate::error_ext::GraphRagErrorExt;
+use graphrag_core::Database;
+use graphrag_core::HnswIndex;
 use nu_plugin::{EngineInterface, EvaluatedCall, PluginCommand};
 use nu_protocol::{Category, PipelineData, Signature, SyntaxShape, Type, Value};
 use std::collections::HashSet;
@@ -70,19 +70,20 @@ impl PluginCommand for GraphRagQuery {
             }
         };
 
-        let db = Database::open(&plugin.db_path)
-            .map_err(|e| e.into_labeled_error(span))?;
+        let db = Database::open(&plugin.db_path).map_err(|e| e.into_labeled_error(span))?;
 
-        let store = db.get_store(&store_name)
+        let store = db
+            .get_store(&store_name)
             .map_err(|e| e.into_labeled_error(span))?;
 
         // Load HNSW index
         let index_path = plugin.index_dir.join(format!("{}.usearch", store_name));
-        let hnsw = HnswIndex::load(&index_path, store.dim)
-            .map_err(|e| e.into_labeled_error(span))?;
+        let hnsw =
+            HnswIndex::load(&index_path, store.dim).map_err(|e| e.into_labeled_error(span))?;
 
         // Step 1: Vector search
-        let vector_results = hnsw.search(&embedding, top_k)
+        let vector_results = hnsw
+            .search(&embedding, top_k)
             .map_err(|e| e.into_labeled_error(span))?;
 
         let initial_chunk_ids: Vec<i64> = vector_results.iter().map(|r| r.key as i64).collect();
@@ -137,7 +138,8 @@ impl PluginCommand for GraphRagQuery {
 
         // Step 4: Fetch all chunks
         let all_chunk_ids: Vec<i64> = expanded_chunk_ids.into_iter().collect();
-        let chunks = db.get_chunks_by_ids(&all_chunk_ids)
+        let chunks = db
+            .get_chunks_by_ids(&all_chunk_ids)
             .map_err(|e| e.into_labeled_error(span))?;
 
         // Step 5: Build result
@@ -170,7 +172,8 @@ impl PluginCommand for GraphRagQuery {
             .collect();
 
         // Get entity details
-        let entities = db.list_entities(&store_name)
+        let entities = db
+            .list_entities(&store_name)
             .map_err(|e| e.into_labeled_error(span))?;
 
         let entity_values: Vec<Value> = entities

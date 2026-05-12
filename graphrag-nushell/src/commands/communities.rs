@@ -1,7 +1,7 @@
-use graphrag_core::Database;
-use crate::error_ext::GraphRagErrorExt;
-use graphrag_core::{Community, CommunityGraph};
 use crate::GraphRagPlugin;
+use crate::error_ext::GraphRagErrorExt;
+use graphrag_core::Database;
+use graphrag_core::{Community, CommunityGraph};
 use nu_plugin::{EngineInterface, EvaluatedCall, PluginCommand};
 use nu_protocol::{Category, PipelineData, Signature, SyntaxShape, Type, Value};
 
@@ -49,13 +49,14 @@ impl PluginCommand for GraphRagCommunities {
         let tolerance: f64 = call.get_flag("tolerance")?.unwrap_or(1e-6);
         let span = call.head;
 
-        let db = Database::open(&plugin.db_path)
-            .map_err(|e| e.into_labeled_error(span))?;
+        let db = Database::open(&plugin.db_path).map_err(|e| e.into_labeled_error(span))?;
 
         // Get all entities and relations
-        let entities = db.list_entities(&store_name)
+        let entities = db
+            .list_entities(&store_name)
             .map_err(|e| e.into_labeled_error(span))?;
-        let relations = db.list_relations(&store_name)
+        let relations = db
+            .list_relations(&store_name)
             .map_err(|e| e.into_labeled_error(span))?;
 
         // Build community graph
@@ -84,16 +85,18 @@ impl PluginCommand for GraphRagCommunities {
             let entity_names: Vec<Value> = node_ids
                 .iter()
                 .filter_map(|&id| {
-                    db.get_entity_by_id(id).ok().map(|e| Value::string(e.name, span))
+                    db.get_entity_by_id(id)
+                        .ok()
+                        .map(|e| Value::string(e.name, span))
                 })
                 .collect();
 
             let entity_types: Vec<Value> = node_ids
                 .iter()
                 .filter_map(|&id| {
-                    db.get_entity_by_id(id).ok().and_then(|e| {
-                        e.entity_type.map(|t| Value::string(t, span))
-                    })
+                    db.get_entity_by_id(id)
+                        .ok()
+                        .and_then(|e| e.entity_type.map(|t| Value::string(t, span)))
                 })
                 .collect();
 
