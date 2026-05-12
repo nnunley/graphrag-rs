@@ -91,6 +91,12 @@ pub struct CommunityGraph {
     total_weight: f64,
 }
 
+impl Default for CommunityGraph {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CommunityGraph {
     /// Create a new empty graph
     pub fn new() -> Self {
@@ -318,10 +324,7 @@ impl CommunityGraph {
         // Group nodes by community
         let mut communities_by_id: HashMap<usize, HashSet<usize>> = HashMap::new();
         for (node_idx, &comm) in assignments.iter().enumerate() {
-            communities_by_id
-                .entry(comm)
-                .or_insert_with(HashSet::new)
-                .insert(node_idx);
+            communities_by_id.entry(comm).or_default().insert(node_idx);
         }
 
         let mut refined: Vec<HashSet<usize>> = communities_by_id.into_values().collect();
@@ -487,7 +490,11 @@ impl CommunityGraph {
                 nodes: nodes.clone(),
                 level,
                 parent_index: parent_idx,
-                modularity: if level == 0 { top_result.modularity } else { 0.0 },
+                modularity: if level == 0 {
+                    top_result.modularity
+                } else {
+                    0.0
+                },
             });
 
             // Check if we should try to partition further
@@ -578,7 +585,10 @@ mod tests {
         let result = graph.leiden(Some(100), 1e-6);
 
         // Should find 2 communities (the two triangles)
-        assert!(result.communities.len() >= 1, "Should find at least 1 community");
+        assert!(
+            !result.communities.is_empty(),
+            "Should find at least 1 community"
+        );
         assert!(result.communities.len() <= 6, "Should not over-partition");
 
         // Total nodes should be 6

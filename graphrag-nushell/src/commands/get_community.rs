@@ -1,6 +1,6 @@
-use graphrag_core::Database;
-use crate::error_ext::GraphRagErrorExt;
 use crate::GraphRagPlugin;
+use crate::error_ext::GraphRagErrorExt;
+use graphrag_core::Database;
 use nu_plugin::{EngineInterface, EvaluatedCall, PluginCommand};
 use nu_protocol::{Category, PipelineData, Signature, SyntaxShape, Type, Value};
 
@@ -36,15 +36,16 @@ impl PluginCommand for GraphRagGetCommunity {
         let community_id: i64 = call.req(1)?;
         let span = call.head;
 
-        let db = Database::open(&plugin.db_path)
-            .map_err(|e| e.into_labeled_error(span))?;
+        let db = Database::open(&plugin.db_path).map_err(|e| e.into_labeled_error(span))?;
 
         // Get community entities
-        let entities = db.get_community_entities(community_id)
+        let entities = db
+            .get_community_entities(community_id)
             .map_err(|e| e.into_labeled_error(span))?;
 
         // Get community record
-        let communities = db.list_communities(&_store_name)
+        let communities = db
+            .list_communities(&_store_name)
             .map_err(|e| e.into_labeled_error(span))?;
 
         let community = communities.iter().find(|c| c.id == community_id);
@@ -66,7 +67,8 @@ impl PluginCommand for GraphRagGetCommunity {
             .collect();
 
         // Get child communities if any
-        let children = db.get_child_communities(community_id)
+        let children = db
+            .get_child_communities(community_id)
             .map_err(|e| e.into_labeled_error(span))?;
         let child_ids: Vec<Value> = children.iter().map(|c| Value::int(c.id, span)).collect();
 
@@ -126,8 +128,7 @@ impl PluginCommand for GraphRagUpdateSummary {
         let summary: String = call.req(1)?;
         let span = call.head;
 
-        let db = Database::open(&plugin.db_path)
-            .map_err(|e| e.into_labeled_error(span))?;
+        let db = Database::open(&plugin.db_path).map_err(|e| e.into_labeled_error(span))?;
 
         db.update_community_summary(community_id, &summary)
             .map_err(|e| e.into_labeled_error(span))?;
@@ -175,10 +176,10 @@ impl PluginCommand for GraphRagListCommunities {
         let store_name: String = call.req(0)?;
         let span = call.head;
 
-        let db = Database::open(&plugin.db_path)
-            .map_err(|e| e.into_labeled_error(span))?;
+        let db = Database::open(&plugin.db_path).map_err(|e| e.into_labeled_error(span))?;
 
-        let communities = db.list_communities(&store_name)
+        let communities = db
+            .list_communities(&store_name)
             .map_err(|e| e.into_labeled_error(span))?;
 
         let values: Vec<Value> = communities

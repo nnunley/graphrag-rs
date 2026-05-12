@@ -1,7 +1,7 @@
-use graphrag_core::Database;
+use crate::GraphRagPlugin;
 use crate::error_ext::GraphRagErrorExt;
 use graphrag_core::CommunityGraph;
-use crate::GraphRagPlugin;
+use graphrag_core::Database;
 use nu_plugin::{EngineInterface, EvaluatedCall, PluginCommand};
 use nu_protocol::{Category, PipelineData, Signature, SyntaxShape, Type, Value};
 use std::collections::HashMap;
@@ -70,8 +70,7 @@ impl PluginCommand for GraphRagStoreCommunities {
         let clear: bool = call.has_flag("clear")?;
         let span = call.head;
 
-        let db = Database::open(&plugin.db_path)
-            .map_err(|e| e.into_labeled_error(span))?;
+        let db = Database::open(&plugin.db_path).map_err(|e| e.into_labeled_error(span))?;
 
         // Optionally clear existing communities
         if clear {
@@ -80,9 +79,11 @@ impl PluginCommand for GraphRagStoreCommunities {
         }
 
         // Get all entities and relations
-        let entities = db.list_entities(&store_name)
+        let entities = db
+            .list_entities(&store_name)
             .map_err(|e| e.into_labeled_error(span))?;
-        let relations = db.list_relations(&store_name)
+        let relations = db
+            .list_relations(&store_name)
             .map_err(|e| e.into_labeled_error(span))?;
 
         // Build community graph
@@ -111,19 +112,27 @@ impl PluginCommand for GraphRagStoreCommunities {
             // Map from flat index to database ID
             let mut index_to_db_id: HashMap<usize, i64> = HashMap::new();
             let mut community_ids: Vec<i64> = Vec::new();
-            let top_modularity = result.communities.first().map(|c| c.modularity).unwrap_or(0.0);
+            let top_modularity = result
+                .communities
+                .first()
+                .map(|c| c.modularity)
+                .unwrap_or(0.0);
 
             for (idx, flat_comm) in result.communities.iter().enumerate() {
                 // Get parent's database ID
-                let parent_db_id = flat_comm.parent_index.and_then(|pi| index_to_db_id.get(&pi).copied());
+                let parent_db_id = flat_comm
+                    .parent_index
+                    .and_then(|pi| index_to_db_id.get(&pi).copied());
 
                 // Create community record
-                let community_id = db.create_community(
-                    &store_name,
-                    flat_comm.level,
-                    flat_comm.modularity,
-                    parent_db_id,
-                ).map_err(|e| e.into_labeled_error(span))?;
+                let community_id = db
+                    .create_community(
+                        &store_name,
+                        flat_comm.level,
+                        flat_comm.modularity,
+                        parent_db_id,
+                    )
+                    .map_err(|e| e.into_labeled_error(span))?;
 
                 index_to_db_id.insert(idx, community_id);
                 community_ids.push(community_id);
@@ -145,7 +154,8 @@ impl PluginCommand for GraphRagStoreCommunities {
                 let node_ids = community.collect_nodes();
 
                 // Create community record
-                let community_id = db.create_community(&store_name, 0, result.modularity, None)
+                let community_id = db
+                    .create_community(&store_name, 0, result.modularity, None)
                     .map_err(|e| e.into_labeled_error(span))?;
 
                 community_ids.push(community_id);

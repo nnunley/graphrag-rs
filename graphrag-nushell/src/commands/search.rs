@@ -1,7 +1,7 @@
-use graphrag_core::Database;
-use crate::error_ext::GraphRagErrorExt;
-use graphrag_core::HnswIndex;
 use crate::GraphRagPlugin;
+use crate::error_ext::GraphRagErrorExt;
+use graphrag_core::Database;
+use graphrag_core::HnswIndex;
 use nu_plugin::{EngineInterface, EvaluatedCall, PluginCommand};
 use nu_protocol::{Category, PipelineData, Signature, SyntaxShape, Type, Value};
 
@@ -62,25 +62,27 @@ impl PluginCommand for GraphRagSearch {
             }
         };
 
-        let db = Database::open(&plugin.db_path)
-            .map_err(|e| e.into_labeled_error(span))?;
+        let db = Database::open(&plugin.db_path).map_err(|e| e.into_labeled_error(span))?;
 
         // Verify store exists
-        let store = db.get_store(&store_name)
+        let store = db
+            .get_store(&store_name)
             .map_err(|e| e.into_labeled_error(span))?;
 
         // Load HNSW index
         let index_path = plugin.index_dir.join(format!("{}.usearch", store_name));
-        let hnsw = HnswIndex::load(&index_path, store.dim)
-            .map_err(|e| e.into_labeled_error(span))?;
+        let hnsw =
+            HnswIndex::load(&index_path, store.dim).map_err(|e| e.into_labeled_error(span))?;
 
         // Search
-        let results = hnsw.search(&embedding, top_k)
+        let results = hnsw
+            .search(&embedding, top_k)
             .map_err(|e| e.into_labeled_error(span))?;
 
         // Get chunk details
         let chunk_ids: Vec<i64> = results.iter().map(|r| r.key as i64).collect();
-        let chunks = db.get_chunks_by_ids(&chunk_ids)
+        let chunks = db
+            .get_chunks_by_ids(&chunk_ids)
             .map_err(|e| e.into_labeled_error(span))?;
 
         // Build result table

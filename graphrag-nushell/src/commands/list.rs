@@ -1,6 +1,6 @@
-use graphrag_core::Database;
-use crate::error_ext::GraphRagErrorExt;
 use crate::GraphRagPlugin;
+use crate::error_ext::GraphRagErrorExt;
+use graphrag_core::Database;
 use nu_plugin::{EngineInterface, EvaluatedCall, PluginCommand};
 use nu_protocol::{Category, PipelineData, Signature, Type, Value};
 
@@ -32,8 +32,7 @@ impl PluginCommand for GraphRagList {
     ) -> Result<PipelineData, nu_protocol::LabeledError> {
         let span = call.head;
 
-        let db = Database::open(&plugin.db_path)
-            .map_err(|e| e.into_labeled_error(span))?;
+        let db = Database::open(&plugin.db_path).map_err(|e| e.into_labeled_error(span))?;
 
         let stores = db.list_stores().map_err(|e| e.into_labeled_error(span))?;
 
@@ -41,9 +40,8 @@ impl PluginCommand for GraphRagList {
             .into_iter()
             .map(|store| {
                 // Get stats for each store
-                let (chunks, entities, relations) = db
-                    .store_stats(&store.name)
-                    .unwrap_or((0, 0, 0));
+                let (chunks, entities, relations) =
+                    db.store_stats(&store.name).unwrap_or((0, 0, 0));
 
                 Value::record(
                     nu_protocol::record! {

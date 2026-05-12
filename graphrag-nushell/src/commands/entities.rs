@@ -1,6 +1,6 @@
-use graphrag_core::Database;
-use crate::error_ext::GraphRagErrorExt;
 use crate::GraphRagPlugin;
+use crate::error_ext::GraphRagErrorExt;
+use graphrag_core::Database;
 use nu_plugin::{EngineInterface, EvaluatedCall, PluginCommand};
 use nu_protocol::{Category, PipelineData, Signature, SyntaxShape, Type, Value};
 
@@ -34,10 +34,10 @@ impl PluginCommand for GraphRagEntities {
         let store_name: String = call.req(0)?;
         let span = call.head;
 
-        let db = Database::open(&plugin.db_path)
-            .map_err(|e| e.into_labeled_error(span))?;
+        let db = Database::open(&plugin.db_path).map_err(|e| e.into_labeled_error(span))?;
 
-        let entities = db.list_entities(&store_name)
+        let entities = db
+            .list_entities(&store_name)
             .map_err(|e| e.into_labeled_error(span))?;
 
         let values: Vec<Value> = entities

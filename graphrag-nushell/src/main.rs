@@ -1,7 +1,7 @@
 mod commands;
 mod error_ext;
 
-use nu_plugin::{serve_plugin, MsgPackSerializer, Plugin, PluginCommand};
+use nu_plugin::{MsgPackSerializer, Plugin, PluginCommand, serve_plugin};
 
 pub struct GraphRagPlugin {
     db_path: std::path::PathBuf,

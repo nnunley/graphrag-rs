@@ -90,10 +90,7 @@ pub fn chunk_markdown(text: &str) -> Vec<String> {
 
 /// Chunk plain text with default settings
 pub fn chunk_plain(text: &str) -> Vec<String> {
-    chunk_text(
-        text,
-        &ChunkerConfig::default().with_markdown(false),
-    )
+    chunk_text(text, &ChunkerConfig::default().with_markdown(false))
 }
 
 #[cfg(test)]

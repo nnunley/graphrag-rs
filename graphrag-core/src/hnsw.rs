@@ -18,13 +18,15 @@ pub struct SearchResult {
 impl HnswIndex {
     /// Create a new HNSW index with specified dimensions
     pub fn new(dim: usize) -> Result<Self, GraphRagError> {
-        let mut options = IndexOptions::default();
-        options.dimensions = dim;
-        options.metric = MetricKind::Cos; // Cosine similarity for embeddings
-        options.quantization = ScalarKind::F32;
-        options.connectivity = 16; // M parameter - connections per node
-        options.expansion_add = 128; // ef_construction
-        options.expansion_search = 64; // ef_search
+        let options = IndexOptions {
+            dimensions: dim,
+            metric: MetricKind::Cos, // Cosine similarity for embeddings
+            quantization: ScalarKind::F32,
+            connectivity: 16,     // M parameter - connections per node
+            expansion_add: 128,   // ef_construction
+            expansion_search: 64, // ef_search
+            ..IndexOptions::default()
+        };
 
         let index = Index::new(&options)
             .map_err(|e| GraphRagError::Hnsw(format!("Failed to create index: {}", e)))?;

@@ -3,7 +3,7 @@
 //! Supports multiple programming languages with intelligent chunking that
 //! respects code structure (functions, classes, modules).
 
-use text_splitter::{CodeSplitter, Characters};
+use text_splitter::{Characters, CodeSplitter};
 
 /// Supported programming languages for code chunking
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,7 +52,9 @@ impl CodeLanguage {
             Self::Rust => CodeSplitter::new(tree_sitter_rust::LANGUAGE, chunk_size),
             Self::Python => CodeSplitter::new(tree_sitter_python::LANGUAGE, chunk_size),
             Self::JavaScript => CodeSplitter::new(tree_sitter_javascript::LANGUAGE, chunk_size),
-            Self::TypeScript => CodeSplitter::new(tree_sitter_typescript::LANGUAGE_TYPESCRIPT, chunk_size),
+            Self::TypeScript => {
+                CodeSplitter::new(tree_sitter_typescript::LANGUAGE_TYPESCRIPT, chunk_size)
+            }
             Self::Go => CodeSplitter::new(tree_sitter_go::LANGUAGE, chunk_size),
             Self::C => CodeSplitter::new(tree_sitter_c::LANGUAGE, chunk_size),
             Self::Cpp => CodeSplitter::new(tree_sitter_cpp::LANGUAGE, chunk_size),
@@ -98,7 +100,11 @@ pub fn chunk_code(code: &str, config: &CodeChunkerConfig) -> Result<Vec<String>,
 }
 
 /// Chunk code with automatic language detection from file extension
-pub fn chunk_code_auto(code: &str, file_path: &str, chunk_size: usize) -> Result<Vec<String>, String> {
+pub fn chunk_code_auto(
+    code: &str,
+    file_path: &str,
+    chunk_size: usize,
+) -> Result<Vec<String>, String> {
     let extension = file_path
         .rsplit('.')
         .next()
@@ -113,12 +119,23 @@ pub fn chunk_code_auto(code: &str, file_path: &str, chunk_size: usize) -> Result
 
 /// Get list of supported languages
 pub fn supported_languages() -> &'static [&'static str] {
-    &["rust", "python", "javascript", "typescript", "go", "c", "cpp"]
+    &[
+        "rust",
+        "python",
+        "javascript",
+        "typescript",
+        "go",
+        "c",
+        "cpp",
+    ]
 }
 
 /// Get supported file extensions
 pub fn supported_extensions() -> &'static [&'static str] {
-    &["rs", "py", "js", "mjs", "cjs", "ts", "tsx", "go", "c", "h", "cpp", "cc", "cxx", "hpp", "hxx"]
+    &[
+        "rs", "py", "js", "mjs", "cjs", "ts", "tsx", "go", "c", "h", "cpp", "cc", "cxx", "hpp",
+        "hxx",
+    ]
 }
 
 #[cfg(test)]
@@ -128,9 +145,18 @@ mod tests {
     #[test]
     fn test_language_from_extension() {
         assert_eq!(CodeLanguage::from_extension("rs"), Some(CodeLanguage::Rust));
-        assert_eq!(CodeLanguage::from_extension("py"), Some(CodeLanguage::Python));
-        assert_eq!(CodeLanguage::from_extension("js"), Some(CodeLanguage::JavaScript));
-        assert_eq!(CodeLanguage::from_extension("ts"), Some(CodeLanguage::TypeScript));
+        assert_eq!(
+            CodeLanguage::from_extension("py"),
+            Some(CodeLanguage::Python)
+        );
+        assert_eq!(
+            CodeLanguage::from_extension("js"),
+            Some(CodeLanguage::JavaScript)
+        );
+        assert_eq!(
+            CodeLanguage::from_extension("ts"),
+            Some(CodeLanguage::TypeScript)
+        );
         assert_eq!(CodeLanguage::from_extension("go"), Some(CodeLanguage::Go));
         assert_eq!(CodeLanguage::from_extension("c"), Some(CodeLanguage::C));
         assert_eq!(CodeLanguage::from_extension("cpp"), Some(CodeLanguage::Cpp));

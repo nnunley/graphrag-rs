@@ -1,4 +1,4 @@
-use graphrag_core::{Database, load_standard_synonyms, canonical_relations};
+use graphrag_core::{Database, canonical_relations, load_standard_synonyms};
 use std::path::PathBuf;
 
 fn main() {
@@ -11,13 +11,19 @@ fn main() {
 
     // Check stores
     let stores = db.list_stores().expect("Failed to list stores");
-    println!("Stores: {:?}", stores.iter().map(|s| &s.name).collect::<Vec<_>>());
+    println!(
+        "Stores: {:?}",
+        stores.iter().map(|s| &s.name).collect::<Vec<_>>()
+    );
 
     // Check relation types before
     if let Some(store) = stores.first() {
         match db.list_relation_types(&store.name) {
             Ok(types) => {
-                println!("\nRelation types BEFORE loading synonyms in '{}':", store.name);
+                println!(
+                    "\nRelation types BEFORE loading synonyms in '{}':",
+                    store.name
+                );
                 for (rel, canonical, count) in types.iter().take(10) {
                     println!("  {:20} -> {:?} ({} instances)", rel, canonical, count);
                 }
@@ -53,7 +59,8 @@ fn main() {
             Ok(types) => {
                 println!("\nRelation types AFTER loading synonyms:");
                 for (rel, canonical, count) in types.iter().take(15) {
-                    println!("  {:20} -> {:20} ({} instances)",
+                    println!(
+                        "  {:20} -> {:20} ({} instances)",
                         rel,
                         canonical.as_deref().unwrap_or("-"),
                         count
@@ -71,8 +78,10 @@ fn main() {
             Ok(rels) => {
                 println!("Found {} relations:", rels.len());
                 for rel in rels.iter().take(5) {
-                    println!("  {} -[{}]-> {} (canonical: {:?})",
-                        rel.head_id, rel.relation, rel.tail_id, rel.canonical_relation);
+                    println!(
+                        "  {} -[{}]-> {} (canonical: {:?})",
+                        rel.head_id, rel.relation, rel.tail_id, rel.canonical_relation
+                    );
                 }
             }
             Err(e) => println!("Error: {}", e),

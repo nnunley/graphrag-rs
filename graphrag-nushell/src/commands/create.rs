@@ -1,7 +1,7 @@
-use graphrag_core::Database;
-use crate::error_ext::GraphRagErrorExt;
-use graphrag_core::HnswIndex;
 use crate::GraphRagPlugin;
+use crate::error_ext::GraphRagErrorExt;
+use graphrag_core::Database;
+use graphrag_core::HnswIndex;
 use nu_plugin::{EngineInterface, EvaluatedCall, PluginCommand};
 use nu_protocol::{Category, PipelineData, Signature, SyntaxShape, Type, Value};
 
@@ -43,8 +43,7 @@ impl PluginCommand for GraphRagCreate {
         let span = call.head;
 
         // Create database and store
-        let db = Database::open(&plugin.db_path)
-            .map_err(|e| e.into_labeled_error(span))?;
+        let db = Database::open(&plugin.db_path).map_err(|e| e.into_labeled_error(span))?;
 
         let store = db
             .create_store(&name, dim)
@@ -53,7 +52,8 @@ impl PluginCommand for GraphRagCreate {
         // Create HNSW index file
         let index_path = plugin.index_dir.join(format!("{}.usearch", name));
         let hnsw = HnswIndex::new(dim).map_err(|e| e.into_labeled_error(span))?;
-        hnsw.save(&index_path).map_err(|e| e.into_labeled_error(span))?;
+        hnsw.save(&index_path)
+            .map_err(|e| e.into_labeled_error(span))?;
 
         // Return store info as record
         let record = Value::record(

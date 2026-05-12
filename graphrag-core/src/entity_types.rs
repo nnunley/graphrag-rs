@@ -16,7 +16,6 @@ pub const STANDARD_TYPE_SYNONYMS: &[(&str, &str)] = &[
     ("user", "person"),
     ("contributor", "person"),
     ("maintainer", "person"),
-
     // Organization (Schema.org)
     ("company", "organization"),
     ("corporation", "organization"),
@@ -25,7 +24,6 @@ pub const STANDARD_TYPE_SYNONYMS: &[(&str, &str)] = &[
     ("team", "organization"),
     ("group", "organization"),
     ("consortium", "organization"),
-
     // Place (Schema.org)
     ("location", "place"),
     ("city", "place"),
@@ -33,14 +31,12 @@ pub const STANDARD_TYPE_SYNONYMS: &[(&str, &str)] = &[
     ("region", "place"),
     ("address", "place"),
     ("venue", "place"),
-
     // Event (Schema.org / Dublin Core)
     ("conference", "event"),
     ("meeting", "event"),
     ("workshop", "event"),
     ("release", "event"),
     ("publication", "event"),
-
     // CreativeWork (Schema.org) -> "document"
     ("article", "document"),
     ("paper", "document"),
@@ -49,7 +45,6 @@ pub const STANDARD_TYPE_SYNONYMS: &[(&str, &str)] = &[
     ("book", "document"),
     ("chapter", "document"),
     ("specification", "document"),
-
     // Software (Dublin Core)
     ("program", "software"),
     ("application", "software"),
@@ -59,14 +54,12 @@ pub const STANDARD_TYPE_SYNONYMS: &[(&str, &str)] = &[
     ("package", "software"),
     ("module", "software"),
     ("plugin", "software"),
-    ("crate", "software"),  // Rust-specific
-
+    ("crate", "software"), // Rust-specific
     // Dataset (Dublin Core)
     ("data", "dataset"),
     ("corpus", "dataset"),
     ("benchmark", "dataset"),
     ("collection", "dataset"),
-
     // Code entities
     ("class", "code_entity"),
     ("function", "code_entity"),
@@ -78,14 +71,12 @@ pub const STANDARD_TYPE_SYNONYMS: &[(&str, &str)] = &[
     ("type", "code_entity"),
     ("variable", "code_entity"),
     ("constant", "code_entity"),
-
     // Concept/Topic (SKOS-like)
     ("topic", "concept"),
     ("idea", "concept"),
     ("theme", "concept"),
     ("subject", "concept"),
     ("category", "concept"),
-
     // Technology/Method
     ("algorithm", "method"),
     ("technique", "method"),
@@ -94,7 +85,6 @@ pub const STANDARD_TYPE_SYNONYMS: &[(&str, &str)] = &[
     ("procedure", "method"),
     ("protocol", "method"),
     ("pattern", "method"),
-
     // Technology stack
     ("technology", "technology"),
     ("language", "technology"),
@@ -103,18 +93,15 @@ pub const STANDARD_TYPE_SYNONYMS: &[(&str, &str)] = &[
     ("database", "technology"),
     ("api", "technology"),
     ("service", "technology"),
-
     // Project/Repository
     ("repository", "project"),
     ("repo", "project"),
     ("codebase", "project"),
-
     // Version/Release
     ("version", "version"),
     ("release", "version"),
     ("edition", "version"),
     ("revision", "version"),
-
     // File/Resource
     ("file", "resource"),
     ("image", "resource"),

@@ -20,7 +20,8 @@ fn main() {
     // Create a test store
     let store_name = "test_store";
     let dim = 768;
-    db.create_store(store_name, dim).expect("Failed to create store");
+    db.create_store(store_name, dim)
+        .expect("Failed to create store");
     println!("✓ Created store '{}' with dim={}", store_name, dim);
 
     // Add some test entities that should be merge candidates
@@ -61,7 +62,9 @@ fn main() {
 
     // Embed all entities
     println!("\nEmbedding entities...");
-    let db_entities = db.list_entities(store_name).expect("Failed to list entities");
+    let db_entities = db
+        .list_entities(store_name)
+        .expect("Failed to list entities");
     for entity in &db_entities {
         let embedding = embedder.embed(&entity.name).expect("Failed to embed");
         db.set_entity_embedding(entity.id, &embedding)
@@ -132,7 +135,9 @@ fn main() {
     }
 
     // Verify entities after merge
-    let final_entities = db.list_entities(store_name).expect("Failed to list entities");
+    let final_entities = db
+        .list_entities(store_name)
+        .expect("Failed to list entities");
     println!(
         "\n✓ Final entity count: {} (was {})",
         final_entities.len(),

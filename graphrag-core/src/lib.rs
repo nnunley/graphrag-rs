@@ -58,18 +58,26 @@ pub mod chunker;
 #[cfg(feature = "code")]
 pub mod code_chunker;
 
-pub use db::{Database, Store, Chunk, Entity, Relation, CommunityRecord, EntityInput};
+pub use db::{Chunk, CommunityRecord, Database, Entity, EntityInput, Relation, Store};
+pub use entity_types::{
+    CANONICAL_ENTITY_TYPES, STANDARD_TYPE_SYNONYMS, canonical_entity_types,
+    load_standard_type_synonyms,
+};
 pub use error::GraphRagError;
 pub use hnsw::{HnswIndex, SearchResult};
-pub use leiden::{CommunityGraph, CommunityHierarchy, Community, FlatCommunity, HierarchicalResult};
+pub use leiden::{
+    Community, CommunityGraph, CommunityHierarchy, FlatCommunity, HierarchicalResult,
+};
 pub use synonyms::{STANDARD_SYNONYMS, canonical_relations, load_standard_synonyms};
-pub use entity_types::{STANDARD_TYPE_SYNONYMS, CANONICAL_ENTITY_TYPES, canonical_entity_types, load_standard_type_synonyms};
 
 #[cfg(feature = "embeddings")]
 pub use embedder::{Embedder, EmbedderConfig, EmbedderModel};
 
 #[cfg(feature = "chunking")]
-pub use chunker::{chunk_text, chunk_markdown, chunk_plain, ChunkerConfig};
+pub use chunker::{ChunkerConfig, chunk_markdown, chunk_plain, chunk_text};
 
 #[cfg(feature = "code")]
-pub use code_chunker::{chunk_code, chunk_code_auto, CodeLanguage, CodeChunkerConfig, supported_languages, supported_extensions};
+pub use code_chunker::{
+    CodeChunkerConfig, CodeLanguage, chunk_code, chunk_code_auto, supported_extensions,
+    supported_languages,
+};

@@ -4,16 +4,16 @@
 //! Implements JSON-RPC 2.0 over stdio with sampling support for LLM-powered features.
 
 use graphrag_core::{
-    chunk_code, chunk_markdown, chunk_text as core_chunk_text, ChunkerConfig, CodeChunkerConfig,
-    CodeLanguage, Database, Embedder, EmbedderConfig, EmbedderModel, HnswIndex, SearchResult,
+    ChunkerConfig, CodeChunkerConfig, CodeLanguage, Database, Embedder, EmbedderConfig,
+    EmbedderModel, HnswIndex, SearchResult, chunk_code, chunk_text as core_chunk_text,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Default chunk size in characters
 const DEFAULT_CHUNK_SIZE: usize = 2000;
@@ -75,6 +75,9 @@ fn get_data_dir() -> PathBuf {
 /// JSON-RPC 2.0 Request
 #[derive(Debug, Deserialize, Clone)]
 struct JsonRpcRequest {
+    /// JSON-RPC version. Required on the wire; we don't act on it post-decode
+    /// because we only support 2.0, but serde must accept the field.
+    #[allow(dead_code)]
     jsonrpc: String,
     id: Option<Value>,
     method: String,
@@ -119,7 +122,14 @@ impl JsonRpcResponse {
     }
 }
 
+// MCP sampling-protocol structs. These describe the wire shape used when
+// requesting LLM completions from the connected MCP client. They're declared
+// here to document the contract and to be ready when sampling is wired into
+// pending-operation handling; for now no constructor exists (see the
+// `pending_operations` map and the request/response handler in
+// `handle_message`). Drop the allow once sampling is invoked from code.
 /// Sampling message content
+#[allow(dead_code)]
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct SamplingContent {
     #[serde(rename = "type")]
@@ -129,6 +139,7 @@ struct SamplingContent {
 }
 
 /// Sampling message
+#[allow(dead_code)]
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct SamplingMessage {
     role: String,
@@ -136,6 +147,7 @@ struct SamplingMessage {
 }
 
 /// Sampling request params
+#[allow(dead_code)]
 #[derive(Debug, Serialize)]
 struct SamplingParams {
     messages: Vec<SamplingMessage>,
@@ -148,12 +160,11 @@ struct SamplingParams {
 }
 
 /// Sampling response result
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct SamplingResult {
     content: SamplingContent,
-    #[allow(dead_code)]
     model: Option<String>,
-    #[allow(dead_code)]
     #[serde(rename = "stopReason")]
     stop_reason: Option<String>,
 }
@@ -198,7 +209,6 @@ enum PendingOperation {
     },
     SummarizeCommunity {
         original_id: Value,
-        store_name: String,
         community_id: i64,
         #[allow(dead_code)]
         entities: Vec<String>,
@@ -210,6 +220,20 @@ struct McpServer {
     data_dir: PathBuf,
     default_store: String,
     pending_operations: HashMap<u64, PendingOperation>,
+}
+
+/// Per-chunk batch context: where in the chunk stream we are and how much
+/// work has accumulated. Bundled so process_chunk and its async continuations
+/// don't need 5-7 individual positional arguments threaded through them.
+struct ChunkBatchProgress {
+    chunk_index: usize,
+    total_chunks: usize,
+    /// Chunks not yet started.
+    remaining_chunks: Vec<String>,
+    /// Total chunks successfully written across the batch so far.
+    chunks_added: usize,
+    /// Total entity-relations extracted across the batch so far.
+    entities_extracted: usize,
 }
 
 impl McpServer {
@@ -237,14 +261,12 @@ impl McpServer {
     /// Handle incoming message - could be a request or a response to our sampling request
     fn handle_message(&mut self, line: &str, stdout: &mut impl Write) {
         // Try to parse as a response first (to our sampling requests)
-        if let Ok(response) = serde_json::from_str::<JsonRpcResponse>(line) {
-            if response.result.is_some() || response.error.is_some() {
-                // This is a response to one of our sampling requests
-                if let Some(id) = response.id.as_u64() {
-                    self.handle_sampling_response(id, response, stdout);
-                    return;
-                }
-            }
+        if let Ok(response) = serde_json::from_str::<JsonRpcResponse>(line)
+            && (response.result.is_some() || response.error.is_some())
+            && let Some(id) = response.id.as_u64()
+        {
+            self.handle_sampling_response(id, response, stdout);
+            return;
         }
 
         // Otherwise parse as a request
@@ -265,7 +287,6 @@ impl McpServer {
             return;
         }
 
-        let id = request.id.clone().unwrap_or(Value::Null);
         let response = self.handle_request(request, stdout);
 
         // Only send response if we have one (some operations are async)
@@ -709,15 +730,16 @@ impl McpServer {
             }
             PendingOperation::SummarizeCommunity {
                 original_id,
-                store_name,
                 community_id,
                 entities: _,
             } => {
                 let final_response =
-                    self.complete_summarize_community(original_id, store_name, community_id, text);
-                if let Err(e) =
-                    writeln!(stdout, "{}", serde_json::to_string(&final_response).unwrap())
-                {
+                    self.complete_summarize_community(original_id, community_id, text);
+                if let Err(e) = writeln!(
+                    stdout,
+                    "{}",
+                    serde_json::to_string(&final_response).unwrap()
+                ) {
                     eprintln!("Write error: {}", e);
                 }
                 let _ = stdout.flush();
@@ -739,7 +761,10 @@ impl McpServer {
         };
 
         let store_name = self.get_store_name(args);
-        let source = args.get("source").and_then(|v| v.as_str()).map(String::from);
+        let source = args
+            .get("source")
+            .and_then(|v| v.as_str())
+            .map(String::from);
 
         // Get chunk parameters from args or use defaults
         let chunk_size = args
@@ -784,12 +809,14 @@ impl McpServer {
             id,
             store_name,
             first_chunk,
-            0,
-            total_chunks,
             source,
-            chunks,
-            0,
-            0,
+            ChunkBatchProgress {
+                chunk_index: 0,
+                total_chunks,
+                remaining_chunks: chunks,
+                chunks_added: 0,
+                entities_extracted: 0,
+            },
             stdout,
         );
 
@@ -837,10 +864,13 @@ impl McpServer {
                 }
             }
         } else {
-            return Some(self.tool_error(
-                id,
-                "Either 'language' or 'file_path' (for auto-detection) must be provided".to_string(),
-            ));
+            return Some(
+                self.tool_error(
+                    id,
+                    "Either 'language' or 'file_path' (for auto-detection) must be provided"
+                        .to_string(),
+                ),
+            );
         };
 
         let store_name = self.get_store_name(args);
@@ -884,12 +914,14 @@ impl McpServer {
             id,
             store_name,
             first_chunk,
-            0,
-            total_chunks,
             source,
-            chunks,
-            0,
-            0,
+            ChunkBatchProgress {
+                chunk_index: 0,
+                total_chunks,
+                remaining_chunks: chunks,
+                chunks_added: 0,
+                entities_extracted: 0,
+            },
             stdout,
         );
 
@@ -902,14 +934,17 @@ impl McpServer {
         original_id: Value,
         store_name: String,
         chunk_content: String,
-        chunk_index: usize,
-        total_chunks: usize,
         source: Option<String>,
-        remaining_chunks: Vec<String>,
-        chunks_added: usize,
-        entities_extracted: usize,
+        batch: ChunkBatchProgress,
         stdout: &mut impl Write,
     ) {
+        let ChunkBatchProgress {
+            chunk_index,
+            total_chunks,
+            remaining_chunks,
+            chunks_added,
+            entities_extracted,
+        } = batch;
         let system_prompt = r#"You are an entity extraction system. Extract entities and their relationships from the given text.
 
 Output ONLY valid JSON in this exact format (no markdown, no explanation):
@@ -1061,7 +1096,8 @@ Rules:
             })
             .collect();
 
-        let system_prompt = "You are reviewing entity extraction results. Answer with ONLY 'yes' or 'no'.";
+        let system_prompt =
+            "You are reviewing entity extraction results. Answer with ONLY 'yes' or 'no'.";
 
         let user_message = format!(
             "Given this text:\n\n{}\n\nThese entities were extracted:\n{}\n\nWere any important entities or relationships missed? Answer only 'yes' or 'no'.",
@@ -1241,7 +1277,6 @@ Rules:
         entities: Vec<Value>,
         stdout: &mut impl Write,
     ) {
-
         // Get embedder
         let embedder = match get_embedder() {
             Ok(e) => e,
@@ -1305,14 +1340,14 @@ Rules:
             }
         });
 
-        let chunk_id = match db.add_chunk(&store_name, &chunk_content, chunk_source.as_deref(), None)
-        {
-            Ok(id) => id,
-            Err(e) => {
-                self.send_final_response(self.tool_error(original_id, e.to_string()), stdout);
-                return;
-            }
-        };
+        let chunk_id =
+            match db.add_chunk(&store_name, &chunk_content, chunk_source.as_deref(), None) {
+                Ok(id) => id,
+                Err(e) => {
+                    self.send_final_response(self.tool_error(original_id, e.to_string()), stdout);
+                    return;
+                }
+            };
 
         // Add to HNSW index
         let index_path = self.index_dir().join(format!("{}.usearch", store_name));
@@ -1346,21 +1381,18 @@ Rules:
             let head_type = entity_val.get("head_type").and_then(|v| v.as_str());
             let tail_type = entity_val.get("tail_type").and_then(|v| v.as_str());
 
-            if let (Some(head), Some(tail), Some(relation)) = (head, tail, relation) {
-                // Create or get entities (deduplication happens via get_or_create)
-                if let Ok(head_id) = db.get_or_create_entity(&store_name, head, head_type, None) {
-                    if let Ok(tail_id) = db.get_or_create_entity(&store_name, tail, tail_type, None)
-                    {
-                        // Add relation
-                        let _ = db.add_relation(&store_name, head_id, tail_id, relation, None);
+            if let (Some(head), Some(tail), Some(relation)) = (head, tail, relation)
+                && let Ok(head_id) = db.get_or_create_entity(&store_name, head, head_type, None)
+                && let Ok(tail_id) = db.get_or_create_entity(&store_name, tail, tail_type, None)
+            {
+                // Add relation
+                let _ = db.add_relation(&store_name, head_id, tail_id, relation, None);
 
-                        // Link to chunk
-                        let _ = db.link_chunk_entity(chunk_id, head_id);
-                        let _ = db.link_chunk_entity(chunk_id, tail_id);
+                // Link to chunk
+                let _ = db.link_chunk_entity(chunk_id, head_id);
+                let _ = db.link_chunk_entity(chunk_id, tail_id);
 
-                        entity_count += 1;
-                    }
-                }
+                entity_count += 1;
             }
         }
 
@@ -1392,12 +1424,14 @@ Rules:
                 original_id,
                 store_name,
                 next_chunk,
-                chunk_index + 1,
-                total_chunks,
                 source,
-                remaining_chunks,
-                new_chunks_added,
-                new_entities_extracted,
+                ChunkBatchProgress {
+                    chunk_index: chunk_index + 1,
+                    total_chunks,
+                    remaining_chunks,
+                    chunks_added: new_chunks_added,
+                    entities_extracted: new_entities_extracted,
+                },
                 stdout,
             );
         }
@@ -1420,11 +1454,13 @@ Rules:
         let community_id = match args.get("community_id").and_then(|v| v.as_i64()) {
             Some(c) => c,
             None => {
-                return Some(self.tool_error(id, "Missing 'community_id' argument".to_string()))
+                return Some(self.tool_error(id, "Missing 'community_id' argument".to_string()));
             }
         };
 
-        let store_name = self.get_store_name(args);
+        // store_name is captured but not needed after community lookup; the
+        // community_id is store-scoped via FK on the chunks table.
+        let _ = self.get_store_name(args);
 
         // Get community entities
         let db = match Database::open(&self.db_path()) {
@@ -1457,13 +1493,10 @@ Rules:
                     } else {
                         rel.head_id
                     };
-                    if let Ok(other) = db.get_entity_by_id(other_id) {
-                        if entity_names.contains(&other.name) {
-                            context.push_str(&format!(
-                                "  -> {} -> {}\n",
-                                rel.relation, other.name
-                            ));
-                        }
+                    if let Ok(other) = db.get_entity_by_id(other_id)
+                        && entity_names.contains(&other.name)
+                    {
+                        context.push_str(&format!("  -> {} -> {}\n", rel.relation, other.name));
                     }
                 }
             }
@@ -1477,7 +1510,6 @@ Rules:
             200,
             PendingOperation::SummarizeCommunity {
                 original_id: id,
-                store_name,
                 community_id,
                 entities: entity_names,
             },
@@ -1490,7 +1522,6 @@ Rules:
     fn complete_summarize_community(
         &self,
         id: Value,
-        store_name: String,
         community_id: i64,
         summary: &str,
     ) -> JsonRpcResponse {
@@ -1582,8 +1613,9 @@ Rules:
             Err(e) => return self.tool_error(id, e.to_string()),
         };
 
-        let mut text =
-            String::from("## GraphRAG Stores\n\n| Name | Dimension | Created |\n|------|-----------|----------|\n");
+        let mut text = String::from(
+            "## GraphRAG Stores\n\n| Name | Dimension | Created |\n|------|-----------|----------|\n",
+        );
         for store in &stores {
             text.push_str(&format!(
                 "| {} | {} | {} |\n",
@@ -1597,10 +1629,7 @@ Rules:
 
     fn tool_entities(&self, args: &Value, id: Value) -> JsonRpcResponse {
         let store_name = self.get_store_name(args);
-        let limit = args
-            .get("limit")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(100) as usize;
+        let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(100) as usize;
 
         let db = match Database::open(&self.db_path()) {
             Ok(d) => d,
@@ -1814,17 +1843,17 @@ Rules:
                 }
                 if let Ok(chunk_ids) = db.get_chunks_for_entity(entity.id) {
                     for chunk_id in chunk_ids.iter().take(1) {
-                        if let Ok(chunks) = db.get_chunks_by_ids(&[*chunk_id]) {
-                            if let Some(chunk) = chunks.first() {
-                                // Truncate long chunks
-                                let content = if chunk.content.len() > 500 {
-                                    format!("{}...", &chunk.content[..500])
-                                } else {
-                                    chunk.content.clone()
-                                };
-                                chunk_sample.push_str(&format!("\n---\n{}\n", content));
-                                chunks_added += 1;
-                            }
+                        if let Ok(chunks) = db.get_chunks_by_ids(&[*chunk_id])
+                            && let Some(chunk) = chunks.first()
+                        {
+                            // Truncate long chunks
+                            let content = if chunk.content.len() > 500 {
+                                format!("{}...", &chunk.content[..500])
+                            } else {
+                                chunk.content.clone()
+                            };
+                            chunk_sample.push_str(&format!("\n---\n{}\n", content));
+                            chunks_added += 1;
                         }
                     }
                 }
@@ -1845,10 +1874,10 @@ Rules:
             }));
 
             // Apply max limit
-            if let Some(max) = max_communities {
-                if community_contexts.len() >= max {
-                    break;
-                }
+            if let Some(max) = max_communities
+                && community_contexts.len() >= max
+            {
+                break;
             }
         }
 
@@ -1887,8 +1916,14 @@ Rules:
         text.push_str("Each community below can be processed by a subagent:\n\n");
 
         for (i, ctx) in community_contexts.iter().enumerate() {
-            let c_id = ctx.get("community_id").and_then(|v| v.as_i64()).unwrap_or(0);
-            let entities = ctx.get("entity_count").and_then(|v| v.as_i64()).unwrap_or(0);
+            let c_id = ctx
+                .get("community_id")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            let entities = ctx
+                .get("entity_count")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
             let summary = ctx
                 .get("summary")
                 .and_then(|v| v.as_str())
@@ -2003,7 +2038,10 @@ Rules:
             ));
         }
 
-        text.push_str(&format!("\n*Found {} candidate pairs*\n\n", candidates.len()));
+        text.push_str(&format!(
+            "\n*Found {} candidate pairs*\n\n",
+            candidates.len()
+        ));
         text.push_str("Use `graphrag_merge_entities` with target_id and source_id to merge pairs.");
 
         self.tool_success(id, text)
@@ -2055,7 +2093,10 @@ Rules:
 
     fn tool_search(&self, args: &Value, id: Value) -> JsonRpcResponse {
         let embedding: Vec<f32> = match args.get("embedding").and_then(|v| v.as_array()) {
-            Some(arr) => arr.iter().filter_map(|v| v.as_f64().map(|f| f as f32)).collect(),
+            Some(arr) => arr
+                .iter()
+                .filter_map(|v| v.as_f64().map(|f| f as f32))
+                .collect(),
             None => return self.tool_error(id, "Missing 'embedding' argument".to_string()),
         };
 
@@ -2116,7 +2157,9 @@ Rules:
             chunk_ids.push(*key as i64);
         }
 
-        let chunks = db.get_chunks_by_ids(&chunk_ids).map_err(|e| e.to_string())?;
+        let chunks = db
+            .get_chunks_by_ids(&chunk_ids)
+            .map_err(|e| e.to_string())?;
 
         for (chunk, result) in chunks.iter().zip(results.iter()) {
             let source = chunk.source.as_deref().unwrap_or("unknown");
