@@ -56,6 +56,10 @@ pub struct EntityInput {
     pub properties: Option<serde_json::Value>,
 }
 
+/// A candidate pair for entity merging:
+/// `(entity1_id, entity1_name, entity2_id, entity2_name, cosine_similarity)`.
+pub type MergeCandidate = (i64, String, i64, String, f32);
+
 /// A detected community of entities
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommunityRecord {
@@ -395,6 +399,37 @@ impl Database {
         Ok(self.conn.last_insert_rowid())
     }
 
+    /// List the most-recent chunks in a store, newest first, capped at `limit`.
+    pub fn list_recent_chunks(
+        &self,
+        store: &str,
+        limit: usize,
+    ) -> Result<Vec<Chunk>, GraphRagError> {
+        let _ = self.get_store(store)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, store, content, source, metadata, created_at
+             FROM chunks
+             WHERE store = ?1
+             ORDER BY id DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![store, limit as i64], |row| {
+            Ok(Chunk {
+                id: row.get(0)?,
+                store: row.get(1)?,
+                content: row.get(2)?,
+                source: row.get(3)?,
+                metadata: row.get(4)?,
+                created_at: row.get(5)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
     pub fn get_chunks_by_ids(&self, ids: &[i64]) -> Result<Vec<Chunk>, GraphRagError> {
         if ids.is_empty() {
             return Ok(vec![]);
@@ -641,10 +676,8 @@ impl Database {
 
     /// Clear existing communities for a store
     pub fn clear_communities(&self, store: &str) -> Result<(), GraphRagError> {
-        self.conn.execute(
-            "DELETE FROM communities WHERE store = ?1",
-            params![store],
-        )?;
+        self.conn
+            .execute("DELETE FROM communities WHERE store = ?1", params![store])?;
         Ok(())
     }
 
@@ -664,7 +697,11 @@ impl Database {
     }
 
     /// Link an entity to a community
-    pub fn link_entity_community(&self, entity_id: i64, community_id: i64) -> Result<(), GraphRagError> {
+    pub fn link_entity_community(
+        &self,
+        entity_id: i64,
+        community_id: i64,
+    ) -> Result<(), GraphRagError> {
         self.conn.execute(
             "INSERT OR IGNORE INTO entity_communities (entity_id, community_id) VALUES (?1, ?2)",
             params![entity_id, community_id],
@@ -673,7 +710,11 @@ impl Database {
     }
 
     /// Update community summary
-    pub fn update_community_summary(&self, community_id: i64, summary: &str) -> Result<(), GraphRagError> {
+    pub fn update_community_summary(
+        &self,
+        community_id: i64,
+        summary: &str,
+    ) -> Result<(), GraphRagError> {
         self.conn.execute(
             "UPDATE communities SET summary = ?2 WHERE id = ?1",
             params![community_id, summary],
@@ -707,7 +748,10 @@ impl Database {
     }
 
     /// Get child communities of a parent
-    pub fn get_child_communities(&self, parent_id: i64) -> Result<Vec<CommunityRecord>, GraphRagError> {
+    pub fn get_child_communities(
+        &self,
+        parent_id: i64,
+    ) -> Result<Vec<CommunityRecord>, GraphRagError> {
         let mut stmt = self.conn.prepare(
             "SELECT id, store, level, parent_id, summary, modularity, created_at FROM communities WHERE parent_id = ?1 ORDER BY id",
         )?;
@@ -755,7 +799,10 @@ impl Database {
     }
 
     /// Get communities for an entity (can be multiple due to hierarchy)
-    pub fn get_entity_communities(&self, entity_id: i64) -> Result<Vec<CommunityRecord>, GraphRagError> {
+    pub fn get_entity_communities(
+        &self,
+        entity_id: i64,
+    ) -> Result<Vec<CommunityRecord>, GraphRagError> {
         let mut stmt = self.conn.prepare(
             "SELECT c.id, c.store, c.level, c.parent_id, c.summary, c.modularity, c.created_at
              FROM communities c
@@ -834,7 +881,10 @@ impl Database {
     }
 
     /// Get all raw relations that map to a canonical form
-    pub fn get_synonyms_for_canonical(&self, canonical: &str) -> Result<Vec<String>, GraphRagError> {
+    pub fn get_synonyms_for_canonical(
+        &self,
+        canonical: &str,
+    ) -> Result<Vec<String>, GraphRagError> {
         let mut stmt = self.conn.prepare(
             "SELECT raw_relation FROM relation_synonyms WHERE canonical_relation = ?1 ORDER BY raw_relation",
         )?;
@@ -865,7 +915,10 @@ impl Database {
     }
 
     /// Get distinct relation types in a store (optionally with counts)
-    pub fn list_relation_types(&self, store: &str) -> Result<Vec<(String, Option<String>, i64)>, GraphRagError> {
+    pub fn list_relation_types(
+        &self,
+        store: &str,
+    ) -> Result<Vec<(String, Option<String>, i64)>, GraphRagError> {
         let _ = self.get_store(store)?;
 
         let mut stmt = self.conn.prepare(
@@ -875,7 +928,9 @@ impl Database {
         )?;
 
         let types = stmt
-            .query_map(params![store], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .query_map(params![store], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(types)
@@ -964,7 +1019,11 @@ impl Database {
     // Entity embedding and merging operations
 
     /// Store an embedding for an entity (for similarity search)
-    pub fn set_entity_embedding(&self, entity_id: i64, embedding: &[f32]) -> Result<(), GraphRagError> {
+    pub fn set_entity_embedding(
+        &self,
+        entity_id: i64,
+        embedding: &[f32],
+    ) -> Result<(), GraphRagError> {
         let blob: Vec<u8> = embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
         self.conn.execute(
             "INSERT OR REPLACE INTO entity_embeddings (entity_id, embedding) VALUES (?1, ?2)",
@@ -992,7 +1051,10 @@ impl Database {
     }
 
     /// Get all entity embeddings in a store (for bulk similarity search)
-    pub fn get_all_entity_embeddings(&self, store: &str) -> Result<Vec<(i64, String, Vec<f32>)>, GraphRagError> {
+    pub fn get_all_entity_embeddings(
+        &self,
+        store: &str,
+    ) -> Result<Vec<(i64, String, Vec<f32>)>, GraphRagError> {
         let _ = self.get_store(store)?;
 
         let mut stmt = self.conn.prepare(
@@ -1101,16 +1163,17 @@ impl Database {
         )?;
 
         // Delete source entity (cascades to embedding)
-        self.conn.execute(
-            "DELETE FROM entities WHERE id = ?1",
-            params![source_id],
-        )?;
+        self.conn
+            .execute("DELETE FROM entities WHERE id = ?1", params![source_id])?;
 
         Ok(())
     }
 
     /// Get merge history for an entity (what was merged into it)
-    pub fn get_entity_merge_history(&self, entity_id: i64) -> Result<Vec<(String, String)>, GraphRagError> {
+    pub fn get_entity_merge_history(
+        &self,
+        entity_id: i64,
+    ) -> Result<Vec<(String, String)>, GraphRagError> {
         let mut stmt = self.conn.prepare(
             "SELECT merged_entity_name, merged_at FROM entity_merges WHERE target_entity_id = ?1 ORDER BY merged_at",
         )?;
@@ -1128,7 +1191,7 @@ impl Database {
         &self,
         store: &str,
         threshold: f32,
-    ) -> Result<Vec<(i64, String, i64, String, f32)>, GraphRagError> {
+    ) -> Result<Vec<MergeCandidate>, GraphRagError> {
         let all_embeddings = self.get_all_entity_embeddings(store)?;
         let mut candidates = Vec::new();
 
@@ -1166,4 +1229,45 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     }
 
     dot / (norm_a * norm_b)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_db() -> (Database, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let db = Database::open(&dir.path().join("test.db")).expect("db opens");
+        (db, dir)
+    }
+
+    #[test]
+    fn list_recent_chunks_returns_most_recent_first() {
+        let (db, _dir) = temp_db();
+        db.create_store("s", 8).expect("create store");
+        let id1 = db.add_chunk("s", "first note", None, None).expect("add 1");
+        let id2 = db.add_chunk("s", "second note", None, None).expect("add 2");
+        let id3 = db.add_chunk("s", "third note", None, None).expect("add 3");
+
+        let recent = db.list_recent_chunks("s", 10).expect("list");
+
+        assert_eq!(recent.len(), 3, "expected 3 chunks");
+        // Most-recent first
+        assert_eq!(recent[0].id, id3);
+        assert_eq!(recent[1].id, id2);
+        assert_eq!(recent[2].id, id1);
+        assert_eq!(recent[0].content, "third note");
+    }
+
+    #[test]
+    fn list_recent_chunks_respects_limit() {
+        let (db, _dir) = temp_db();
+        db.create_store("s", 8).expect("create store");
+        for i in 0..5 {
+            db.add_chunk("s", &format!("note {i}"), None, None)
+                .expect("add");
+        }
+        let recent = db.list_recent_chunks("s", 2).expect("list");
+        assert_eq!(recent.len(), 2);
+    }
 }
