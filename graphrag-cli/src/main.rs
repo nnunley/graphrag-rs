@@ -1,10 +1,15 @@
 use clap::{Parser, Subcommand};
-use graphrag_core::Database;
+use graphrag_core::{
+    CommunityGraph, Database, Embedder, EmbedderConfig, EmbedderModel, HnswIndex, LexicalIndex,
+    RemoteEmbedderConfig, default_embedder_cache_dir, load_standard_synonyms,
+    load_standard_type_synonyms,
+};
+use graphrag_llm::{ChatClient, EntityTriple, OllamaChatClient, strategy_for_model};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 const DEFAULT_STORE: &str = "conversations";
-const DEFAULT_DIM: usize = 768; // nomic-embed-text-v1.5
 
 #[derive(Parser)]
 #[command(name = "graphrag", about = "Local hybrid graph + vector memory")]
@@ -27,7 +32,16 @@ enum Commands {
         store: Option<String>,
     },
     /// Search the knowledge graph
-    Ask,
+    Ask {
+        /// The query text
+        query: String,
+        /// Maximum number of hits to return (default: 5)
+        #[arg(long, default_value_t = 5)]
+        top: usize,
+        /// Store name (default: conversations)
+        #[arg(long)]
+        store: Option<String>,
+    },
     /// Show recent notes
     Log {
         /// Maximum number of notes to show (default: 20)
@@ -37,8 +51,36 @@ enum Commands {
         #[arg(long)]
         store: Option<String>,
     },
-    /// Run entity extraction, embedding, and community detection
-    Enrich,
+    /// Rebuild vector indexes for existing chunks
+    BackfillEmbeddings {
+        /// Store name (default: conversations)
+        #[arg(long)]
+        store: Option<String>,
+    },
+    /// Detect and persist communities for an existing entity graph
+    Enrich {
+        /// Store name (default: conversations)
+        #[arg(long)]
+        store: Option<String>,
+        /// Clear existing communities before detecting new ones
+        #[arg(long)]
+        clear: bool,
+        /// Extract entities and relations from chunks via Ollama before building communities
+        #[arg(long)]
+        extract: bool,
+        /// Maximum Leiden iterations
+        #[arg(long, default_value_t = 100)]
+        max_iterations: usize,
+        /// Leiden convergence tolerance
+        #[arg(long, default_value_t = 1e-6)]
+        tolerance: f64,
+        /// Maximum hierarchy levels (1 = flat)
+        #[arg(long, default_value_t = 1)]
+        levels: i32,
+        /// Minimum community size to partition further
+        #[arg(long, default_value_t = 5)]
+        min_size: usize,
+    },
 }
 
 fn data_dir() -> PathBuf {
@@ -52,22 +94,316 @@ fn data_dir() -> PathBuf {
         })
 }
 
+struct StoragePaths {
+    data_dir: PathBuf,
+}
+
+impl StoragePaths {
+    fn from_env() -> Self {
+        Self {
+            data_dir: data_dir(),
+        }
+    }
+
+    fn db_path(&self) -> PathBuf {
+        self.data_dir.join("graphrag.db")
+    }
+
+    fn index_path(&self, store: &str) -> PathBuf {
+        self.data_dir
+            .join("indexes")
+            .join(format!("{store}.usearch"))
+    }
+
+    /// Forward-compat sidecar for leit Phase 2 cursor-based persistence.
+    /// Today these bytes can't be reloaded into a searchable index — we
+    /// write them anyway so the on-disk format is in place when leit ships
+    /// the load path.
+    fn lexical_segment_path(&self, store: &str) -> PathBuf {
+        self.data_dir
+            .join("indexes")
+            .join(format!("{store}.leitseg"))
+    }
+}
+
 fn open_db() -> Result<Database, String> {
-    let dir = data_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("create data dir: {e}"))?;
-    Database::open(&dir.join("graphrag.db")).map_err(|e| format!("open db: {e}"))
+    open_db_at(&StoragePaths::from_env())
+}
+
+fn open_db_at(paths: &StoragePaths) -> Result<Database, String> {
+    std::fs::create_dir_all(&paths.data_dir).map_err(|e| format!("create data dir: {e}"))?;
+    Database::open(&paths.db_path()).map_err(|e| format!("open db: {e}"))
+}
+
+fn open_embedder() -> Result<Embedder, String> {
+    let model = std::env::var("GRAPHRAG_EMBED_MODEL")
+        .ok()
+        .and_then(|model| match model.to_lowercase().as_str() {
+            "minilm" | "mini" => Some(EmbedderModel::MiniLM),
+            "nomic" | "nomic-embed-text" => Some(EmbedderModel::NomicEmbedText),
+            "openai" | "openai-ada002" | "ada002" => Some(EmbedderModel::OpenAIAda002),
+            "openai3" | "openai-3-small" | "openai3-small" => Some(EmbedderModel::OpenAI3Small),
+            _ => None,
+        })
+        .unwrap_or(EmbedderModel::NomicEmbedText);
+
+    let remote_config = if model.is_remote() {
+        let api_key = std::env::var("GRAPHRAG_OPENAI_API_KEY")
+            .or_else(|_| std::env::var("OPENAI_API_KEY"))
+            .map_err(
+                |_| "GRAPHRAG_OPENAI_API_KEY or OPENAI_API_KEY required for remote embedder",
+            )?;
+
+        let mut config = RemoteEmbedderConfig::new(api_key);
+
+        if let Ok(base_url) = std::env::var("GRAPHRAG_OPENAI_BASE_URL") {
+            config = config.with_base_url(&base_url);
+        }
+
+        Some(config)
+    } else {
+        None
+    };
+
+    Embedder::new(EmbedderConfig {
+        model,
+        show_download_progress: true,
+        cache_dir: Some(default_embedder_cache_dir()),
+        remote: remote_config,
+    })
+    .map_err(|e| format!("embedder: {e}"))
 }
 
 fn cmd_note(text: &str, source: Option<&str>, store: &str) -> Result<(), String> {
-    let db = open_db()?;
-    if db.get_store(store).is_err() {
-        db.create_store(store, DEFAULT_DIM)
-            .map_err(|e| format!("create store {store}: {e}"))?;
+    let paths = StoragePaths::from_env();
+    let embedder = open_embedder()?;
+    let chunk_id = cmd_note_with_embedder(&paths, text, source, store, |text| {
+        embedder.embed(text).map_err(|e| e.to_string())
+    })?;
+    println!("ok chunk_id={chunk_id}");
+    Ok(())
+}
+
+fn cmd_note_with_embedder<F>(
+    paths: &StoragePaths,
+    text: &str,
+    source: Option<&str>,
+    store: &str,
+    embed: F,
+) -> Result<i64, String>
+where
+    F: Fn(&str) -> Result<Vec<f32>, String>,
+{
+    let embedding = embed(text)?;
+    let db = open_db_at(paths)?;
+    let store_record = match db.get_store(store) {
+        Ok(store_record) => store_record,
+        Err(_) => db
+            .create_store(store, embedding.len())
+            .map_err(|e| format!("create store {store}: {e}"))?,
+    };
+    if store_record.dim != embedding.len() {
+        return Err(format!(
+            "dimension mismatch: store has {}, embedder produced {}",
+            store_record.dim,
+            embedding.len()
+        ));
     }
+
     let chunk_id = db
         .add_chunk(store, text, source, None)
         .map_err(|e| format!("add chunk: {e}"))?;
-    println!("ok chunk_id={chunk_id}");
+    let index_path = paths.index_path(store);
+    let hnsw = HnswIndex::load(&index_path, store_record.dim)
+        .or_else(|_| HnswIndex::new(store_record.dim))
+        .map_err(|e| format!("open index: {e}"))?;
+    hnsw.add(chunk_id as u64, &embedding)
+        .map_err(|e| format!("index chunk: {e}"))?;
+    hnsw.save(&index_path)
+        .map_err(|e| format!("save index: {e}"))?;
+    rebuild_lexical_sidecar(paths, &db, store)?;
+    Ok(chunk_id)
+}
+
+/// Rebuild the leit segment sidecar for a store. Called after every chunk
+/// add; cheap at small corpora, scales with chunk count. leit Phase 1 has no
+/// incremental-add API, so full rebuild is the only option.
+fn rebuild_lexical_sidecar(paths: &StoragePaths, db: &Database, store: &str) -> Result<(), String> {
+    let chunks = db
+        .list_chunks(store)
+        .map_err(|e| format!("list chunks for lexical rebuild: {e}"))?;
+    let Some(index) = LexicalIndex::build_from_chunks(&chunks)
+        .map_err(|e| format!("build lexical index: {e}"))?
+    else {
+        // Empty store — nothing to write. Don't leave a stale sidecar.
+        let path = paths.lexical_segment_path(store);
+        let _ = std::fs::remove_file(&path);
+        return Ok(());
+    };
+    let bytes = index
+        .to_segment_bytes()
+        .map_err(|e| format!("serialize lexical segment: {e}"))?;
+    let path = paths.lexical_segment_path(store);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create lexical dir: {e}"))?;
+    }
+    std::fs::write(&path, &bytes)
+        .map_err(|e| format!("write lexical segment {}: {e}", path.display()))?;
+    Ok(())
+}
+
+fn cmd_backfill_embeddings(store: &str) -> Result<(), String> {
+    let paths = StoragePaths::from_env();
+    eprintln!("initializing embedder...");
+    let embedder = open_embedder()?;
+    let count = cmd_backfill_embeddings_with_embedder(&paths, store, |text| {
+        embedder.embed(text).map_err(|e| e.to_string())
+    })?;
+    println!("store={store} backfilled={count}");
+    Ok(())
+}
+
+fn cmd_backfill_embeddings_with_embedder<F>(
+    paths: &StoragePaths,
+    store: &str,
+    embed: F,
+) -> Result<usize, String>
+where
+    F: Fn(&str) -> Result<Vec<f32>, String>,
+{
+    let db = open_db_at(paths)?;
+    let store_record = db
+        .get_store(store)
+        .map_err(|e| format!("get store {store}: {e}"))?;
+    let chunks = db
+        .list_chunks(store)
+        .map_err(|e| format!("list chunks: {e}"))?;
+    let hnsw = HnswIndex::new(store_record.dim).map_err(|e| format!("create index: {e}"))?;
+    hnsw.reserve(chunks.len())
+        .map_err(|e| format!("reserve index: {e}"))?;
+
+    for (idx, chunk) in chunks.iter().enumerate() {
+        let embedding = embed(&chunk.content)?;
+        if embedding.len() != store_record.dim {
+            return Err(format!(
+                "dimension mismatch for chunk {}: store has {}, embedder produced {}",
+                chunk.id,
+                store_record.dim,
+                embedding.len()
+            ));
+        }
+        hnsw.add(chunk.id as u64, &embedding)
+            .map_err(|e| format!("index chunk {}: {e}", chunk.id))?;
+        let completed = idx + 1;
+        if completed == chunks.len() || completed % 25 == 0 {
+            eprintln!("backfilled {completed}/{} chunks", chunks.len());
+        }
+    }
+
+    hnsw.save(&paths.index_path(store))
+        .map_err(|e| format!("save index: {e}"))?;
+    Ok(chunks.len())
+}
+
+fn cmd_ask(query: &str, top: usize, store: &str) -> Result<(), String> {
+    // Hybrid recall: HNSW (semantic) + leit BM25 (lexical), fused via RRF.
+    //
+    // Mirrors the MCP server's tool_recall in shape (same embedder, same
+    // chunk store), but stays CLI-shaped: rebuild the leit index per
+    // invocation rather than caching, since the CLI is one-shot.
+    let paths = StoragePaths::from_env();
+    let db = open_db_at(&paths)?;
+    let store_record = match db.get_store(store) {
+        Ok(s) => s,
+        Err(_) => return Ok(()),
+    };
+
+    // --- Lane 1: HNSW vector recall ---
+    let embedder = open_embedder()?;
+    let embedding = embedder.embed(query).map_err(|e| e.to_string())?;
+    if embedding.len() != store_record.dim {
+        return Err(format!(
+            "dimension mismatch: embedder produced {}, store has {}",
+            embedding.len(),
+            store_record.dim
+        ));
+    }
+    let index_path = paths.index_path(store);
+    // Pull a larger candidate pool than `top` so RRF has overlap to fuse.
+    let candidate_k = top.max(5) * 4;
+    let vector_hits = match HnswIndex::load(&index_path, store_record.dim) {
+        Ok(hnsw) => hnsw
+            .search(&embedding, candidate_k)
+            .map_err(|e| format!("vector search: {e}"))?,
+        Err(_) => Vec::new(), // No HNSW index yet — degrade to lexical-only.
+    };
+
+    // --- Lane 2: leit BM25 recall (rebuild per query) ---
+    let chunks_all = db
+        .list_chunks(store)
+        .map_err(|e| format!("list chunks: {e}"))?;
+    let lexical_hits = match LexicalIndex::build_from_chunks(&chunks_all)
+        .map_err(|e| format!("build lexical: {e}"))?
+    {
+        Some(idx) => idx
+            .search(query, candidate_k)
+            .map_err(|e| format!("lexical search: {e}"))?,
+        None => Vec::new(),
+    };
+
+    if vector_hits.is_empty() && lexical_hits.is_empty() {
+        return Ok(());
+    }
+
+    // --- Fuse via RRF (k=60, leit default) ---
+    let vector_ranked: Vec<graphrag_core::leit_fusion::RankedResult> = vector_hits
+        .iter()
+        .enumerate()
+        .map(|(i, h)| graphrag_core::leit_fusion::RankedResult::new(h.key.to_string(), i + 1))
+        .collect();
+    let lexical_ranked: Vec<graphrag_core::leit_fusion::RankedResult> = lexical_hits
+        .iter()
+        .enumerate()
+        .map(|(i, (id, _))| graphrag_core::leit_fusion::RankedResult::new(id.to_string(), i + 1))
+        .collect();
+    let fused = graphrag_core::leit_fusion::fuse_default(&[vector_ranked, lexical_ranked]);
+
+    // --- Render top-k ---
+    let final_ids: Vec<i64> = fused
+        .iter()
+        .take(top)
+        .filter_map(|f| f.id.parse().ok())
+        .collect();
+    let chunks = db
+        .get_chunks_by_ids(&final_ids)
+        .map_err(|e| format!("fetch chunks: {e}"))?;
+    let chunks_by_id: HashMap<i64, &graphrag_core::Chunk> =
+        chunks.iter().map(|c| (c.id, c)).collect();
+    // Also surface per-lane source/score for transparency during the
+    // hybrid-recall bringup. Drop these badges once the tuning is stable.
+    let vec_lookup: HashMap<u64, f32> = vector_hits.iter().map(|h| (h.key, h.distance)).collect();
+    let lex_lookup: HashMap<i64, f32> = lexical_hits.iter().copied().collect();
+    for (rank, f) in fused.iter().take(top).enumerate() {
+        let Ok(id) = f.id.parse::<i64>() else {
+            continue;
+        };
+        let Some(chunk) = chunks_by_id.get(&id) else {
+            continue;
+        };
+        let src = chunk.source.as_deref().unwrap_or("-");
+        let vec_badge = vec_lookup
+            .get(&(id as u64))
+            .map(|d| format!("vec={d:.3}"))
+            .unwrap_or_else(|| "vec=-".to_string());
+        let lex_badge = lex_lookup
+            .get(&id)
+            .map(|s| format!("lex={s:.3}"))
+            .unwrap_or_else(|| "lex=-".to_string());
+        println!(
+            "#{rank}\trrf={:.4}\t{vec_badge}\t{lex_badge}\t{}\t[{}]\t{}",
+            f.score, chunk.created_at, src, chunk.content
+        );
+    }
     Ok(())
 }
 
@@ -87,6 +423,202 @@ fn cmd_log(limit: usize, store: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn cmd_enrich(
+    store: &str,
+    clear: bool,
+    extract: bool,
+    max_iterations: usize,
+    tolerance: f64,
+    levels: i32,
+    min_size: usize,
+) -> Result<(), String> {
+    if levels < 1 {
+        return Err("--levels must be at least 1".to_string());
+    }
+    if min_size < 1 {
+        return Err("--min-size must be at least 1".to_string());
+    }
+
+    let db = open_db()?;
+    let _ = db
+        .get_store(store)
+        .map_err(|e| format!("get store {store}: {e}"))?;
+
+    load_standard_synonyms(&db).map_err(|e| format!("load relation synonyms: {e}"))?;
+    load_standard_type_synonyms(&db).map_err(|e| format!("load entity type synonyms: {e}"))?;
+
+    let extracted = if extract {
+        let client = OllamaChatClient::from_env()?;
+        Some(extract_entities_for_chunks(&db, store, &client, client.model())?)
+    } else {
+        None
+    };
+
+    if clear {
+        db.clear_communities(store)
+            .map_err(|e| format!("clear communities: {e}"))?;
+    }
+
+    let entities = db
+        .list_entities(store)
+        .map_err(|e| format!("list entities: {e}"))?;
+    let relations = db
+        .list_relations(store)
+        .map_err(|e| format!("list relations: {e}"))?;
+
+    let mut graph = CommunityGraph::new();
+    for entity in &entities {
+        graph.add_node(entity.id);
+    }
+    for relation in &relations {
+        graph.add_edge(relation.head_id, relation.tail_id, 1.0);
+    }
+
+    let (community_count, depth, modularity) = if levels > 1 {
+        persist_hierarchical_communities(
+            &db,
+            store,
+            &graph,
+            max_iterations,
+            tolerance,
+            min_size,
+            levels,
+        )?
+    } else {
+        persist_flat_communities(&db, store, &graph, max_iterations, tolerance)?
+    };
+
+    println!(
+        "store={store} entities={} relations={} communities={} depth={} modularity={:.6}",
+        entities.len(),
+        relations.len(),
+        community_count,
+        depth,
+        modularity
+    );
+    if let Some(extracted) = extracted {
+        eprintln!("extracted={extracted} entity_relations");
+    }
+    Ok(())
+}
+
+fn extract_entities_for_chunks<C: ChatClient>(
+    db: &Database,
+    store: &str,
+    client: &C,
+    model: &str,
+) -> Result<usize, String> {
+    let chunks = db
+        .list_chunks(store)
+        .map_err(|e| format!("list chunks: {e}"))?;
+    let total = chunks.len();
+    let mut extracted = 0;
+
+    // Resolve the per-model extraction strategy (2026-08-03 spike): triple-lines default,
+    // JSON for nemotron-class. The strategy owns prompt-build, output-format, and parse.
+    let strategy = strategy_for_model(model);
+    let response_format = strategy.response_format();
+
+    for (idx, chunk) in chunks.iter().enumerate() {
+        let prompt = strategy.build_prompt(&chunk.content, idx, total);
+        let response = client.complete_with_format(&prompt, response_format.as_ref())?;
+        let parsed = strategy.parse(&response);
+        persist_entity_triples(db, store, chunk.id, &parsed.triples)?;
+        extracted += parsed.triples.len();
+
+        let completed = idx + 1;
+        if completed == total || completed % 25 == 0 {
+            eprintln!("extracted metadata for {completed}/{total} chunks");
+        }
+    }
+
+    Ok(extracted)
+}
+
+fn persist_entity_triples(
+    db: &Database,
+    store: &str,
+    chunk_id: i64,
+    triples: &[EntityTriple],
+) -> Result<(), String> {
+    for triple in triples {
+        let head_id = db
+            .get_or_create_entity(store, &triple.head, triple.head_type.as_deref(), None)
+            .map_err(|e| format!("create head entity: {e}"))?;
+        let tail_id = db
+            .get_or_create_entity(store, &triple.tail, triple.tail_type.as_deref(), None)
+            .map_err(|e| format!("create tail entity: {e}"))?;
+        db.add_relation(store, head_id, tail_id, &triple.relation, None)
+            .map_err(|e| format!("add relation: {e}"))?;
+        db.link_chunk_entity(chunk_id, head_id)
+            .map_err(|e| format!("link head entity: {e}"))?;
+        db.link_chunk_entity(chunk_id, tail_id)
+            .map_err(|e| format!("link tail entity: {e}"))?;
+    }
+
+    Ok(())
+}
+
+fn persist_flat_communities(
+    db: &Database,
+    store: &str,
+    graph: &CommunityGraph,
+    max_iterations: usize,
+    tolerance: f64,
+) -> Result<(usize, i32, f64), String> {
+    let result = graph.leiden(Some(max_iterations), tolerance);
+    let mut community_count = 0;
+
+    for community in &result.communities {
+        let community_id = db
+            .create_community(store, 0, result.modularity, None)
+            .map_err(|e| format!("create community: {e}"))?;
+        community_count += 1;
+
+        for entity_id in community.collect_nodes() {
+            db.link_entity_community(entity_id, community_id)
+                .map_err(|e| format!("link entity community: {e}"))?;
+        }
+    }
+
+    Ok((community_count, 1, result.modularity))
+}
+
+fn persist_hierarchical_communities(
+    db: &Database,
+    store: &str,
+    graph: &CommunityGraph,
+    max_iterations: usize,
+    tolerance: f64,
+    min_size: usize,
+    levels: i32,
+) -> Result<(usize, i32, f64), String> {
+    let result = graph.leiden_hierarchical(Some(max_iterations), tolerance, min_size, Some(levels));
+    let mut index_to_db_id: HashMap<usize, i64> = HashMap::new();
+    let top_modularity = result
+        .communities
+        .first()
+        .map(|community| community.modularity)
+        .unwrap_or(0.0);
+
+    for (idx, community) in result.communities.iter().enumerate() {
+        let parent_id = community
+            .parent_index
+            .and_then(|parent_index| index_to_db_id.get(&parent_index).copied());
+        let community_id = db
+            .create_community(store, community.level, community.modularity, parent_id)
+            .map_err(|e| format!("create community: {e}"))?;
+        index_to_db_id.insert(idx, community_id);
+
+        for &entity_id in &community.nodes {
+            db.link_entity_community(entity_id, community_id)
+                .map_err(|e| format!("link entity community: {e}"))?;
+        }
+    }
+
+    Ok((result.communities.len(), result.depth, top_modularity))
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
@@ -100,7 +632,29 @@ fn main() -> ExitCode {
             store.as_deref().unwrap_or(DEFAULT_STORE),
         ),
         Commands::Log { limit, store } => cmd_log(limit, store.as_deref().unwrap_or(DEFAULT_STORE)),
-        Commands::Ask | Commands::Enrich => Err("not yet implemented".to_string()),
+        Commands::BackfillEmbeddings { store } => {
+            cmd_backfill_embeddings(store.as_deref().unwrap_or(DEFAULT_STORE))
+        }
+        Commands::Enrich {
+            store,
+            clear,
+            extract,
+            max_iterations,
+            tolerance,
+            levels,
+            min_size,
+        } => cmd_enrich(
+            store.as_deref().unwrap_or(DEFAULT_STORE),
+            clear,
+            extract,
+            max_iterations,
+            tolerance,
+            levels,
+            min_size,
+        ),
+        Commands::Ask { query, top, store } => {
+            cmd_ask(&query, top, store.as_deref().unwrap_or(DEFAULT_STORE))
+        }
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -108,5 +662,111 @@ fn main() -> ExitCode {
             eprintln!("error: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_paths(label: &str) -> StoragePaths {
+        let pid = std::process::id();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let data_dir =
+            std::env::temp_dir().join(format!("graphrag-cli-unit-{label}-{pid}-{nanos}"));
+        StoragePaths { data_dir }
+    }
+
+    fn fake_embed(text: &str) -> Result<Vec<f32>, String> {
+        if text.contains("beta") {
+            Ok(vec![0.0, 1.0, 0.0])
+        } else {
+            Ok(vec![1.0, 0.0, 0.0])
+        }
+    }
+
+    struct FakeChatClient;
+
+    impl ChatClient for FakeChatClient {
+        fn complete(&self, _prompt: &graphrag_llm::ChatPrompt) -> Result<String, String> {
+            Ok(r#"{"entities":[{"head":"Alice","head_type":"Person","relation":"uses","tail":"GraphRAG","tail_type":"Software"}]}"#.to_string())
+        }
+    }
+
+    #[test]
+    fn note_writes_chunk_and_vector_index() {
+        let paths = temp_paths("note-vector-index");
+
+        let chunk_id = cmd_note_with_embedder(
+            &paths,
+            "alpha note",
+            Some("unit"),
+            DEFAULT_STORE,
+            fake_embed,
+        )
+        .expect("note should write db and index");
+
+        let db = Database::open(&paths.db_path()).expect("db opens");
+        let store = db.get_store(DEFAULT_STORE).expect("store exists");
+        assert_eq!(store.dim, 3);
+
+        let hnsw = HnswIndex::load(&paths.index_path(DEFAULT_STORE), 3).expect("index loads");
+        let results = hnsw.search(&[1.0, 0.0, 0.0], 1).expect("search works");
+        assert_eq!(results[0].key, chunk_id as u64);
+    }
+
+    #[test]
+    fn backfill_embeddings_rebuilds_index_for_existing_chunks() {
+        let paths = temp_paths("backfill-vector-index");
+        let db = Database::open(&paths.db_path()).expect("db opens");
+        db.create_store(DEFAULT_STORE, 3).expect("store created");
+        let alpha_id = db
+            .add_chunk(DEFAULT_STORE, "alpha note", None, None)
+            .expect("alpha chunk");
+        let beta_id = db
+            .add_chunk(DEFAULT_STORE, "beta note", None, None)
+            .expect("beta chunk");
+
+        let count = cmd_backfill_embeddings_with_embedder(&paths, DEFAULT_STORE, fake_embed)
+            .expect("backfill should rebuild index");
+
+        assert_eq!(count, 2);
+        let hnsw = HnswIndex::load(&paths.index_path(DEFAULT_STORE), 3).expect("index loads");
+        let alpha = hnsw.search(&[1.0, 0.0, 0.0], 1).expect("alpha search");
+        let beta = hnsw.search(&[0.0, 1.0, 0.0], 1).expect("beta search");
+        assert_eq!(alpha[0].key, alpha_id as u64);
+        assert_eq!(beta[0].key, beta_id as u64);
+    }
+
+    #[test]
+    fn extract_entities_for_chunks_persists_llm_metadata() {
+        let paths = temp_paths("extract-entities");
+        let db = Database::open(&paths.db_path()).expect("db opens");
+        db.create_store(DEFAULT_STORE, 3).expect("store created");
+        let chunk_id = db
+            .add_chunk(DEFAULT_STORE, "Alice uses GraphRAG.", None, None)
+            .expect("chunk");
+
+        // "nemotron" resolves to JsonStrategy, matching FakeChatClient's JSON output.
+        let extracted = extract_entities_for_chunks(&db, DEFAULT_STORE, &FakeChatClient, "nemotron3:33b")
+            .expect("metadata extraction succeeds");
+
+        assert_eq!(extracted, 1);
+        let alice = db
+            .get_entity_by_name(DEFAULT_STORE, "Alice")
+            .expect("head entity");
+        let graph = db
+            .get_entity_by_name(DEFAULT_STORE, "GraphRAG")
+            .expect("tail entity");
+        let relations = db.get_relations_for_entity(alice.id).expect("relations");
+        let linked = db.get_entities_for_chunk(chunk_id).expect("chunk entities");
+
+        assert_eq!(relations[0].tail_id, graph.id);
+        assert!(linked.iter().any(|entity| entity.name == "Alice"));
+        assert!(linked.iter().any(|entity| entity.name == "GraphRAG"));
     }
 }

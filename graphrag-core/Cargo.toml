@@ -12,6 +12,7 @@ path = "src/lib.rs"
 [features]
 default = ["embeddings", "chunking"]
 embeddings = ["fastembed"]
+embeddings_remote = ["reqwest", "tokio"]
 chunking = ["text-splitter"]
 code = ["text-splitter/code", "tree-sitter-rust", "tree-sitter-python", "tree-sitter-javascript", "tree-sitter-typescript", "tree-sitter-go", "tree-sitter-c", "tree-sitter-cpp"]
 
@@ -21,8 +22,20 @@ usearch = "2.15"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
+dirs = "5.0"
+
+# Lexical retrieval (BM25 over an in-memory inverted index).
+# Path deps point at the local leit workspace; switch to a versioned crate
+# (or git rev) when leit publishes.
+leit_core = { path = "/Users/ndn/development/leit/crates/leit_core" }
+leit_text = { path = "/Users/ndn/development/leit/crates/leit_text" }
+leit_index = { path = "/Users/ndn/development/leit/crates/leit_index" }
+leit_score = { path = "/Users/ndn/development/leit/crates/leit_score" }
+leit_fusion = { path = "/Users/ndn/development/leit/crates/leit_fusion" }
 fastembed = { version = "4", optional = true }
 text-splitter = { version = "0.29", features = ["markdown"], optional = true }
+reqwest = { version = "0.12", features = ["json", "blocking"], optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"], optional = true }
 
 # Tree-sitter parsers for code chunking
 tree-sitter-rust = { version = "0.23", optional = true }
