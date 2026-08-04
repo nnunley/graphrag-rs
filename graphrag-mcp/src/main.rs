@@ -5,7 +5,12 @@
 
 use graphrag_core::{
     ChunkerConfig, CodeChunkerConfig, CodeLanguage, Database, Embedder, EmbedderConfig,
-    EmbedderModel, HnswIndex, SearchResult, chunk_code, chunk_text as core_chunk_text,
+    EmbedderModel, HnswIndex, LexicalIndex, SearchResult, chunk_code,
+    chunk_text as core_chunk_text, default_embedder_cache_dir, leit_fusion,
+};
+use graphrag_llm::{
+    EntityTriple, continuation_extraction_prompt, entity_extraction_prompt,
+    parse_entity_extraction, reflection_prompt,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -51,7 +56,8 @@ fn get_embedder() -> Result<&'static Embedder, String> {
             let config = EmbedderConfig {
                 model,
                 show_download_progress: true,
-                cache_dir: None,
+                cache_dir: Some(default_embedder_cache_dir()),
+                remote: None,
             };
 
             Embedder::new(config).map_err(|e| e.to_string())
@@ -189,7 +195,7 @@ enum PendingOperation {
         chunks_added: usize,
         entities_extracted: usize,
         /// Entities found so far in this chunk (for reflection)
-        current_chunk_entities: Vec<Value>,
+        current_chunk_entities: Vec<EntityTriple>,
         /// Current reflection iteration (0 = initial extraction)
         reflection_iteration: usize,
     },
@@ -204,7 +210,7 @@ enum PendingOperation {
         remaining_chunks: Vec<String>,
         chunks_added: usize,
         entities_extracted: usize,
-        current_chunk_entities: Vec<Value>,
+        current_chunk_entities: Vec<EntityTriple>,
         reflection_iteration: usize,
     },
     SummarizeCommunity {
@@ -220,6 +226,17 @@ struct McpServer {
     data_dir: PathBuf,
     default_store: String,
     pending_operations: HashMap<u64, PendingOperation>,
+    /// Per-store BM25 indexes, built lazily on first recall, retained for
+    /// the server's lifetime, invalidated on add_document/add_code. leit
+    /// Phase 1 has no incremental adds, so any mutation rebuilds the whole
+    /// thing on the next recall.
+    ///
+    /// Known limitation: external `graphrag note` (CLI) writes the
+    /// `.leitseg` sidecar but does NOT signal this in-process cache, so a
+    /// long-lived MCP server will serve a stale lexical index after a
+    /// CLI-side note. Acceptable today — agents use MCP, users restart.
+    /// Fix when we add a filesystem-watch hook or mtime-stamp check.
+    lexical_cache: std::sync::Mutex<HashMap<String, std::sync::Arc<LexicalIndex>>>,
 }
 
 /// Per-chunk batch context: where in the chunk stream we are and how much
@@ -243,7 +260,47 @@ impl McpServer {
             default_store: std::env::var("GRAPHRAG_STORE")
                 .unwrap_or_else(|_| "conversations".to_string()),
             pending_operations: HashMap::new(),
+            lexical_cache: std::sync::Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Borrow (and lazily build) the cached LexicalIndex for `store`.
+    /// Returns `None` when the store is empty so callers can fall through
+    /// to vector-only recall cleanly.
+    fn cached_lexical_for(
+        &self,
+        db: &Database,
+        store: &str,
+    ) -> Result<Option<std::sync::Arc<LexicalIndex>>, String> {
+        {
+            let cache = self.lexical_cache.lock().unwrap();
+            if let Some(idx) = cache.get(store) {
+                return Ok(Some(idx.clone()));
+            }
+        }
+        // Build outside the lock so concurrent recalls on different stores
+        // don't serialize on each other's index-build. Cost of a duplicate
+        // build on the same store under contention is acceptable.
+        let chunks = db
+            .list_chunks(store)
+            .map_err(|e| format!("list chunks for lexical build: {e}"))?;
+        let Some(index) = LexicalIndex::build_from_chunks(&chunks)
+            .map_err(|e| format!("build lexical index: {e}"))?
+        else {
+            return Ok(None);
+        };
+        let arc = std::sync::Arc::new(index);
+        let mut cache = self.lexical_cache.lock().unwrap();
+        // Last-writer-wins on race; both Arc'd indexes are equivalent.
+        cache.insert(store.to_string(), arc.clone());
+        Ok(Some(arc))
+    }
+
+    /// Drop the cached LexicalIndex for `store`. Called from any path that
+    /// mutates chunks (add_document, add_code). The next recall rebuilds.
+    fn invalidate_lexical(&self, store: &str) {
+        let mut cache = self.lexical_cache.lock().unwrap();
+        cache.remove(store);
     }
 
     fn db_path(&self) -> PathBuf {
@@ -945,27 +1002,7 @@ impl McpServer {
             chunks_added,
             entities_extracted,
         } = batch;
-        let system_prompt = r#"You are an entity extraction system. Extract entities and their relationships from the given text.
-
-Output ONLY valid JSON in this exact format (no markdown, no explanation):
-{
-  "entities": [
-    {"head": "Entity1", "head_type": "Person|Software|Concept|Organization|Location|Other", "relation": "relationship_verb", "tail": "Entity2", "tail_type": "Person|Software|Concept|Organization|Location|Other"}
-  ]
-}
-
-Rules:
-- Extract concrete, specific entities (not generic terms)
-- Relations should be active verbs (uses, implements, created, manages, etc.)
-- If no clear entities exist, return {"entities": []}
-- Output ONLY the JSON, nothing else"#;
-
-        let user_message = format!(
-            "Extract entities from this text (chunk {}/{}):\n\n{}",
-            chunk_index + 1,
-            total_chunks,
-            chunk_content
-        );
+        let prompt = entity_extraction_prompt(&chunk_content, chunk_index, total_chunks);
 
         eprintln!(
             "Processing chunk {}/{} ({} chars)",
@@ -975,9 +1012,9 @@ Rules:
         );
 
         self.send_sampling_request(
-            system_prompt,
-            &user_message,
-            1000,
+            &prompt.system,
+            &prompt.user,
+            prompt.max_tokens,
             PendingOperation::AddChunk {
                 original_id,
                 store_name,
@@ -1008,16 +1045,14 @@ Rules:
         remaining_chunks: Vec<String>,
         chunks_added: usize,
         entities_extracted: usize,
-        mut current_chunk_entities: Vec<Value>,
+        mut current_chunk_entities: Vec<EntityTriple>,
         reflection_iteration: usize,
         llm_response: &str,
         stdout: &mut impl Write,
     ) {
         // Parse new entities from LLM response
-        let new_entities: Vec<Value> = serde_json::from_str::<Value>(llm_response)
-            .ok()
-            .and_then(|v| v.get("entities").cloned())
-            .and_then(|e| e.as_array().cloned())
+        let new_entities = parse_entity_extraction(llm_response)
+            .map(|extraction| extraction.entities)
             .unwrap_or_default();
 
         // Merge new entities with existing ones
@@ -1081,34 +1116,16 @@ Rules:
         remaining_chunks: Vec<String>,
         chunks_added: usize,
         entities_extracted: usize,
-        current_chunk_entities: Vec<Value>,
+        current_chunk_entities: Vec<EntityTriple>,
         reflection_iteration: usize,
         stdout: &mut impl Write,
     ) {
-        // Build list of entities found so far
-        let entity_list: Vec<String> = current_chunk_entities
-            .iter()
-            .filter_map(|e| {
-                let head = e.get("head").and_then(|v| v.as_str())?;
-                let tail = e.get("tail").and_then(|v| v.as_str())?;
-                let rel = e.get("relation").and_then(|v| v.as_str())?;
-                Some(format!("{} -[{}]-> {}", head, rel, tail))
-            })
-            .collect();
-
-        let system_prompt =
-            "You are reviewing entity extraction results. Answer with ONLY 'yes' or 'no'.";
-
-        let user_message = format!(
-            "Given this text:\n\n{}\n\nThese entities were extracted:\n{}\n\nWere any important entities or relationships missed? Answer only 'yes' or 'no'.",
-            chunk_content,
-            entity_list.join("\n")
-        );
+        let prompt = reflection_prompt(&chunk_content, &current_chunk_entities);
 
         self.send_sampling_request(
-            system_prompt,
-            &user_message,
-            10, // Very short response expected
+            &prompt.system,
+            &prompt.user,
+            prompt.max_tokens,
             PendingOperation::ReflectionCheck {
                 original_id,
                 store_name,
@@ -1139,7 +1156,7 @@ Rules:
         remaining_chunks: Vec<String>,
         chunks_added: usize,
         entities_extracted: usize,
-        current_chunk_entities: Vec<Value>,
+        current_chunk_entities: Vec<EntityTriple>,
         reflection_iteration: usize,
         response: &str,
         stdout: &mut impl Write,
@@ -1205,45 +1222,16 @@ Rules:
         remaining_chunks: Vec<String>,
         chunks_added: usize,
         entities_extracted: usize,
-        current_chunk_entities: Vec<Value>,
+        current_chunk_entities: Vec<EntityTriple>,
         reflection_iteration: usize,
         stdout: &mut impl Write,
     ) {
-        // Build list of already-found entities
-        let entity_list: Vec<String> = current_chunk_entities
-            .iter()
-            .filter_map(|e| {
-                let head = e.get("head").and_then(|v| v.as_str())?;
-                let tail = e.get("tail").and_then(|v| v.as_str())?;
-                Some(format!("{}, {}", head, tail))
-            })
-            .collect();
-
-        let system_prompt = r#"You are an entity extraction system. MANY entities were missed in the previous extraction. Extract additional entities and relationships that were missed.
-
-Output ONLY valid JSON in this exact format (no markdown, no explanation):
-{
-  "entities": [
-    {"head": "Entity1", "head_type": "Person|Software|Concept|Organization|Location|Other", "relation": "relationship_verb", "tail": "Entity2", "tail_type": "Person|Software|Concept|Organization|Location|Other"}
-  ]
-}
-
-Rules:
-- Focus on entities NOT in the already-extracted list
-- Extract concrete, specific entities (not generic terms)
-- Relations should be active verbs (uses, implements, created, manages, etc.)
-- Output ONLY the JSON, nothing else"#;
-
-        let user_message = format!(
-            "Already extracted entities: {}\n\nExtract ADDITIONAL entities from this text:\n\n{}",
-            entity_list.join(", "),
-            chunk_content
-        );
+        let prompt = continuation_extraction_prompt(&chunk_content, &current_chunk_entities);
 
         self.send_sampling_request(
-            system_prompt,
-            &user_message,
-            1000,
+            &prompt.system,
+            &prompt.user,
+            prompt.max_tokens,
             PendingOperation::AddChunk {
                 original_id,
                 store_name,
@@ -1274,7 +1262,7 @@ Rules:
         mut remaining_chunks: Vec<String>,
         chunks_added: usize,
         entities_extracted: usize,
-        entities: Vec<Value>,
+        entities: Vec<EntityTriple>,
         stdout: &mut impl Write,
     ) {
         // Get embedder
@@ -1348,6 +1336,11 @@ Rules:
                     return;
                 }
             };
+        // Lexical cache is now stale for this store; next recall rebuilds.
+        // Cheaper to invalidate here than after the whole batch finishes —
+        // multi-chunk add_document writes one chunk per sampling callback,
+        // so we'd otherwise serve N-1 stale recalls during a single ingest.
+        self.invalidate_lexical(&store_name);
 
         // Add to HNSW index
         let index_path = self.index_dir().join(format!("{}.usearch", store_name));
@@ -1374,19 +1367,20 @@ Rules:
 
         // Process entities
         let mut entity_count = 0;
-        for entity_val in &entities {
-            let head = entity_val.get("head").and_then(|v| v.as_str());
-            let tail = entity_val.get("tail").and_then(|v| v.as_str());
-            let relation = entity_val.get("relation").and_then(|v| v.as_str());
-            let head_type = entity_val.get("head_type").and_then(|v| v.as_str());
-            let tail_type = entity_val.get("tail_type").and_then(|v| v.as_str());
-
-            if let (Some(head), Some(tail), Some(relation)) = (head, tail, relation)
-                && let Ok(head_id) = db.get_or_create_entity(&store_name, head, head_type, None)
-                && let Ok(tail_id) = db.get_or_create_entity(&store_name, tail, tail_type, None)
-            {
+        for entity in &entities {
+            if let Ok(head_id) = db.get_or_create_entity(
+                &store_name,
+                &entity.head,
+                entity.head_type.as_deref(),
+                None,
+            ) && let Ok(tail_id) = db.get_or_create_entity(
+                &store_name,
+                &entity.tail,
+                entity.tail_type.as_deref(),
+                None,
+            ) {
                 // Add relation
-                let _ = db.add_relation(&store_name, head_id, tail_id, relation, None);
+                let _ = db.add_relation(&store_name, head_id, tail_id, &entity.relation, None);
 
                 // Link to chunk
                 let _ = db.link_chunk_entity(chunk_id, head_id);
@@ -1585,16 +1579,57 @@ Rules:
             );
         }
 
+        // Hybrid recall: HNSW (semantic) ∪ leit BM25 (lexical), fused via RRF.
+        // Pull candidate_k per lane so RRF has overlap to fuse over.
+        let candidate_k = top.max(5) * 4;
+
         let index_path = self.index_dir().join(format!("{}.usearch", store_name));
-        let hnsw = match HnswIndex::load(&index_path, store.dim) {
-            Ok(h) => h,
-            Err(e) => return self.tool_error(id, e.to_string()),
+        let vector_hits = match HnswIndex::load(&index_path, store.dim) {
+            Ok(hnsw) => match hnsw.search(&embedding, candidate_k) {
+                Ok(r) => r,
+                Err(e) => return self.tool_error(id, e.to_string()),
+            },
+            Err(_) => Vec::new(),
         };
 
-        let results = match hnsw.search(&embedding, top) {
-            Ok(r) => r,
-            Err(e) => return self.tool_error(id, e.to_string()),
+        let lexical_hits = match self.cached_lexical_for(&db, &store_name) {
+            Ok(Some(idx)) => match idx.search(query, candidate_k) {
+                Ok(h) => h,
+                Err(e) => return self.tool_error(id, e.to_string()),
+            },
+            Ok(None) => Vec::new(),
+            Err(e) => return self.tool_error(id, e),
         };
+
+        if vector_hits.is_empty() && lexical_hits.is_empty() {
+            return self.tool_success(id, String::new());
+        }
+
+        let vector_ranked: Vec<leit_fusion::RankedResult> = vector_hits
+            .iter()
+            .enumerate()
+            .map(|(i, h)| leit_fusion::RankedResult::new(h.key.to_string(), i + 1))
+            .collect();
+        let lexical_ranked: Vec<leit_fusion::RankedResult> = lexical_hits
+            .iter()
+            .enumerate()
+            .map(|(i, (cid, _))| leit_fusion::RankedResult::new(cid.to_string(), i + 1))
+            .collect();
+        let fused = leit_fusion::fuse_default(&[vector_ranked, lexical_ranked]);
+
+        // Translate fused output back into SearchResult so the existing
+        // format_search_results + graph-expansion path keeps working unchanged.
+        // SearchResult.distance is repurposed as the RRF score (higher = better).
+        let results: Vec<SearchResult> = fused
+            .iter()
+            .take(top)
+            .filter_map(|f| {
+                f.id.parse::<u64>().ok().map(|key| SearchResult {
+                    key,
+                    distance: f.score as f32,
+                })
+            })
+            .collect();
 
         match self.format_search_results(&db, &results, expand) {
             Ok(text) => self.tool_success(id, text),

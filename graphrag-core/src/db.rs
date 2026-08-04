@@ -430,6 +430,32 @@ impl Database {
         Ok(out)
     }
 
+    /// List all chunks in a store, oldest first.
+    pub fn list_chunks(&self, store: &str) -> Result<Vec<Chunk>, GraphRagError> {
+        let _ = self.get_store(store)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, store, content, source, metadata, created_at
+             FROM chunks
+             WHERE store = ?1
+             ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map(params![store], |row| {
+            Ok(Chunk {
+                id: row.get(0)?,
+                store: row.get(1)?,
+                content: row.get(2)?,
+                source: row.get(3)?,
+                metadata: row.get(4)?,
+                created_at: row.get(5)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
     pub fn get_chunks_by_ids(&self, ids: &[i64]) -> Result<Vec<Chunk>, GraphRagError> {
         if ids.is_empty() {
             return Ok(vec![]);

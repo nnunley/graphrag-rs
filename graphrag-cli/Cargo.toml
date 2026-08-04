@@ -9,7 +9,8 @@ name = "graphrag"
 path = "src/main.rs"
 
 [dependencies]
-graphrag-core = { path = "../graphrag-core", features = ["embeddings"] }
+graphrag-core = { path = "../graphrag-core", features = ["embeddings", "embeddings_remote"] }
+graphrag-llm = { path = "../graphrag-llm" }
 clap = { version = "4", features = ["derive"] }
 dirs = "5"
 

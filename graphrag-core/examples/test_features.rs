@@ -49,6 +49,7 @@ fn main() {
         model: EmbedderModel::NomicEmbedText,
         show_download_progress: true,
         cache_dir: None,
+        remote: None,
     };
     let embedder = match Embedder::new(config) {
         Ok(e) => e,

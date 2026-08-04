@@ -47,6 +47,7 @@ pub mod entity_types;
 pub mod error;
 pub mod hnsw;
 pub mod leiden;
+pub mod lexical;
 pub mod synonyms;
 
 #[cfg(feature = "embeddings")]
@@ -65,13 +66,20 @@ pub use entity_types::{
 };
 pub use error::GraphRagError;
 pub use hnsw::{HnswIndex, SearchResult};
+pub use lexical::LexicalIndex;
+
 pub use leiden::{
     Community, CommunityGraph, CommunityHierarchy, FlatCommunity, HierarchicalResult,
 };
+/// Re-export so consumers can fuse lanes without taking leit_fusion as a
+/// direct dep (the lexical module is the only intended user of fusion here).
+pub use leit_fusion;
 pub use synonyms::{STANDARD_SYNONYMS, canonical_relations, load_standard_synonyms};
 
 #[cfg(feature = "embeddings")]
-pub use embedder::{Embedder, EmbedderConfig, EmbedderModel};
+pub use embedder::{
+    Embedder, EmbedderConfig, EmbedderModel, RemoteEmbedderConfig, default_embedder_cache_dir,
+};
 
 #[cfg(feature = "chunking")]
 pub use chunker::{ChunkerConfig, chunk_markdown, chunk_plain, chunk_text};

@@ -1,22 +1,28 @@
 //! Text embedding module for GraphRAG
 //!
-//! Provides text-to-vector embedding using local models via fastembed.
+//! Provides text-to-vector embedding using local models via fastembed
+//! or remote APIs (OpenAI, etc.).
 //! Supports multiple models with automatic chunking for long texts.
 
 use crate::error::GraphRagError;
+use std::path::PathBuf;
 
 #[cfg(feature = "embeddings")]
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+
+const EMBED_CACHE_DIR_ENV: &str = "GRAPHRAG_EMBED_CACHE_DIR";
 
 /// Configuration for the embedder
 #[derive(Debug, Clone)]
 pub struct EmbedderConfig {
     /// Model to use for embeddings
     pub model: EmbedderModel,
-    /// Whether to show download progress
+    /// Whether to show download progress (local models only)
     pub show_download_progress: bool,
-    /// Cache directory for models (None = default)
+    /// Cache directory for models (None = default, local models only)
     pub cache_dir: Option<std::path::PathBuf>,
+    /// Remote API configuration (used for remote models)
+    pub remote: Option<RemoteEmbedderConfig>,
 }
 
 impl Default for EmbedderConfig {
@@ -25,7 +31,70 @@ impl Default for EmbedderConfig {
             model: EmbedderModel::NomicEmbedText,
             show_download_progress: true,
             cache_dir: None,
+            remote: None,
         }
+    }
+}
+
+/// Resolve the default cache directory for local embedding models.
+///
+/// This keeps model downloads out of the current working directory when the
+/// embedder is started from long-lived services like MCP servers.
+pub fn default_embedder_cache_dir() -> PathBuf {
+    resolve_embedder_cache_dir(
+        std::env::var(EMBED_CACHE_DIR_ENV).ok(),
+        dirs::cache_dir(),
+        dirs::home_dir(),
+    )
+}
+
+fn resolve_embedder_cache_dir(
+    env_override: Option<String>,
+    cache_dir: Option<PathBuf>,
+    home_dir: Option<PathBuf>,
+) -> PathBuf {
+    if let Some(path) = env_override
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        return path;
+    }
+
+    cache_dir
+        .or_else(|| home_dir.map(|home| home.join(".cache")))
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("graphrag")
+        .join("fastembed")
+}
+
+/// Configuration for remote embedding APIs
+#[derive(Debug, Clone)]
+pub struct RemoteEmbedderConfig {
+    /// API key for the remote service
+    pub api_key: String,
+    /// Base URL override (None = use default)
+    pub base_url: Option<String>,
+    /// Model identifier (e.g., "text-embedding-ada-002")
+    pub model: Option<String>,
+}
+
+impl RemoteEmbedderConfig {
+    pub fn new(api_key: String) -> Self {
+        Self {
+            api_key,
+            base_url: None,
+            model: None,
+        }
+    }
+
+    pub fn with_model(mut self, model: &str) -> Self {
+        self.model = Some(model.to_string());
+        self
+    }
+
+    pub fn with_base_url(mut self, url: &str) -> Self {
+        self.base_url = Some(url.to_string());
+        self
     }
 }
 
@@ -38,6 +107,12 @@ pub enum EmbedderModel {
     /// all-MiniLM-L6-v2 - 384 dims, 256 token context
     /// Faster, smaller, good for short texts
     MiniLM,
+    /// OpenAI text-embedding-ada-002 - 1536 dims
+    /// Requires API key
+    OpenAIAda002,
+    /// OpenAI text-embedding-3-small - 1536 dims
+    /// Newer, better quality model
+    OpenAI3Small,
 }
 
 impl EmbedderModel {
@@ -46,6 +121,8 @@ impl EmbedderModel {
         match self {
             EmbedderModel::NomicEmbedText => 768,
             EmbedderModel::MiniLM => 384,
+            EmbedderModel::OpenAIAda002 => 1536,
+            EmbedderModel::OpenAI3Small => 1536,
         }
     }
 
@@ -54,6 +131,8 @@ impl EmbedderModel {
         match self {
             EmbedderModel::NomicEmbedText => 8192,
             EmbedderModel::MiniLM => 256,
+            EmbedderModel::OpenAIAda002 => 8192,
+            EmbedderModel::OpenAI3Small => 8192,
         }
     }
 
@@ -66,35 +145,173 @@ impl EmbedderModel {
     pub fn max_chars(&self) -> usize {
         self.max_tokens() * self.chars_per_token()
     }
+
+    /// Check if this is a remote model (requires API)
+    pub fn is_remote(&self) -> bool {
+        matches!(
+            self,
+            EmbedderModel::OpenAIAda002 | EmbedderModel::OpenAI3Small
+        )
+    }
+
+    /// Get the default model name for remote APIs
+    pub fn default_remote_model(&self) -> &'static str {
+        match self {
+            EmbedderModel::OpenAIAda002 => "text-embedding-ada-002",
+            EmbedderModel::OpenAI3Small => "text-embedding-3-small",
+            _ => "",
+        }
+    }
 }
 
 /// Text embedder using local models
 #[cfg(feature = "embeddings")]
 pub struct Embedder {
-    model: TextEmbedding,
+    #[cfg(feature = "embeddings")]
+    local: Option<TextEmbedding>,
+    #[cfg(feature = "embeddings_remote")]
+    remote: Option<RemoteEmbedder>,
     config: EmbedderConfig,
+}
+
+#[cfg(feature = "embeddings_remote")]
+enum RemoteEmbedder {
+    OpenAI(OpenAIEmbedder),
+}
+
+#[cfg(feature = "embeddings_remote")]
+pub struct OpenAIEmbedder {
+    client: reqwest::blocking::Client,
+    api_key: String,
+    base_url: String,
+    model: String,
+}
+
+#[cfg(feature = "embeddings_remote")]
+impl OpenAIEmbedder {
+    pub fn new(config: &RemoteEmbedderConfig, model: EmbedderModel) -> Result<Self, GraphRagError> {
+        let base_url = config
+            .base_url
+            .clone()
+            .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+        let model = config
+            .model
+            .clone()
+            .unwrap_or_else(|| model.default_remote_model().to_string());
+
+        let client = reqwest::blocking::Client::new();
+
+        Ok(Self {
+            client,
+            api_key: config.api_key.clone(),
+            base_url,
+            model,
+        })
+    }
+
+    pub fn embed(&self, text: &str) -> Result<Vec<f32>, GraphRagError> {
+        let url = format!("{}/embeddings", self.base_url);
+
+        #[derive(serde::Serialize)]
+        struct EmbedRequest<'a> {
+            input: &'a str,
+            model: &'a str,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct EmbedResponse {
+            data: Vec<EmbedData>,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct EmbedData {
+            embedding: Vec<f32>,
+        }
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("Content-Type", "application/json")
+            .json(&EmbedRequest {
+                input: text,
+                model: &self.model,
+            })
+            .send()
+            .map_err(|e| GraphRagError::Embedding(format!("API request failed: {}", e)))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().unwrap_or_default();
+            return Err(GraphRagError::Embedding(format!(
+                "API error ({}): {}",
+                status, body
+            )));
+        }
+
+        let result: EmbedResponse = response
+            .json()
+            .map_err(|e| GraphRagError::Embedding(format!("Failed to parse response: {}", e)))?;
+
+        result
+            .data
+            .into_iter()
+            .next()
+            .map(|d| d.embedding)
+            .ok_or_else(|| GraphRagError::Embedding("No embedding in response".to_string()))
+    }
 }
 
 #[cfg(feature = "embeddings")]
 impl Embedder {
     /// Create a new embedder with the given configuration
     pub fn new(config: EmbedderConfig) -> Result<Self, GraphRagError> {
-        let fastembed_model = match config.model {
-            EmbedderModel::NomicEmbedText => EmbeddingModel::NomicEmbedTextV15,
-            EmbedderModel::MiniLM => EmbeddingModel::AllMiniLML6V2,
+        #[cfg(feature = "embeddings")]
+        let local = if config.model.is_remote() {
+            None
+        } else {
+            let fastembed_model = match config.model {
+                EmbedderModel::NomicEmbedText => EmbeddingModel::NomicEmbedTextV15,
+                EmbedderModel::MiniLM => EmbeddingModel::AllMiniLML6V2,
+                _ => return Err(GraphRagError::Embedding("Unknown local model".to_string())),
+            };
+
+            let mut options = InitOptions::new(fastembed_model)
+                .with_show_download_progress(config.show_download_progress);
+
+            if let Some(ref cache_dir) = config.cache_dir {
+                options = options.with_cache_dir(cache_dir.clone());
+            }
+
+            let model = TextEmbedding::try_new(options)
+                .map_err(|e| GraphRagError::Embedding(e.to_string()))?;
+            Some(model)
         };
 
-        let mut options = InitOptions::new(fastembed_model)
-            .with_show_download_progress(config.show_download_progress);
+        #[cfg(feature = "embeddings_remote")]
+        let remote = if config.model.is_remote() {
+            let remote_config = config.remote.as_ref().ok_or_else(|| {
+                GraphRagError::Embedding(
+                    "Remote embedder requires API key configuration".to_string(),
+                )
+            })?;
+            Some(RemoteEmbedder::OpenAI(OpenAIEmbedder::new(
+                remote_config,
+                config.model,
+            )?))
+        } else {
+            None
+        };
 
-        if let Some(ref cache_dir) = config.cache_dir {
-            options = options.with_cache_dir(cache_dir.clone());
-        }
+        #[cfg(not(feature = "embeddings"))]
+        let local: Option<TextEmbedding> = None;
 
-        let model =
-            TextEmbedding::try_new(options).map_err(|e| GraphRagError::Embedding(e.to_string()))?;
-
-        Ok(Self { model, config })
+        Ok(Self {
+            local,
+            #[cfg(feature = "embeddings_remote")]
+            remote,
+            config,
+        })
     }
 
     /// Create an embedder with default configuration (nomic-embed-text)
@@ -137,15 +354,28 @@ impl Embedder {
 
     /// Embed a single text without chunking
     fn embed_single(&self, text: &str) -> Result<Vec<f32>, GraphRagError> {
-        let embeddings = self
-            .model
-            .embed(vec![text], None)
-            .map_err(|e| GraphRagError::Embedding(e.to_string()))?;
+        #[cfg(feature = "embeddings")]
+        if let Some(ref model) = self.local {
+            let embeddings = model
+                .embed(vec![text], None)
+                .map_err(|e| GraphRagError::Embedding(e.to_string()))?;
 
-        embeddings
-            .into_iter()
-            .next()
-            .ok_or_else(|| GraphRagError::Embedding("No embedding returned".to_string()))
+            return embeddings
+                .into_iter()
+                .next()
+                .ok_or_else(|| GraphRagError::Embedding("No embedding returned".to_string()));
+        }
+
+        #[cfg(feature = "embeddings_remote")]
+        if let Some(ref remote) = self.remote {
+            match remote {
+                RemoteEmbedder::OpenAI(oai) => return oai.embed(text),
+            }
+        }
+
+        Err(GraphRagError::Embedding(
+            "No embedder configured".to_string(),
+        ))
     }
 
     /// Embed long text using chunked mean-pooling
@@ -159,15 +389,32 @@ impl Embedder {
             return Err(GraphRagError::Embedding("Empty text".to_string()));
         }
 
-        // Embed all chunks
-        let chunk_refs: Vec<&str> = chunks.iter().map(|s| s.as_str()).collect();
-        let embeddings = self
-            .model
-            .embed(chunk_refs, None)
-            .map_err(|e| GraphRagError::Embedding(e.to_string()))?;
+        #[cfg(feature = "embeddings")]
+        if let Some(ref model) = self.local {
+            let chunk_refs: Vec<&str> = chunks.iter().map(|s| s.as_str()).collect();
+            let embeddings = model
+                .embed(chunk_refs, None)
+                .map_err(|e| GraphRagError::Embedding(e.to_string()))?;
+            return Ok(mean_pool(&embeddings));
+        }
 
-        // Mean pool across all chunk embeddings
-        Ok(mean_pool(&embeddings))
+        #[cfg(feature = "embeddings_remote")]
+        if let Some(ref remote) = self.remote {
+            match remote {
+                RemoteEmbedder::OpenAI(oai) => {
+                    let mut embeddings = Vec::new();
+                    for chunk in chunks {
+                        let emb = oai.embed(&chunk)?;
+                        embeddings.push(emb);
+                    }
+                    return Ok(mean_pool(&embeddings));
+                }
+            }
+        }
+
+        Err(GraphRagError::Embedding(
+            "No embedder configured".to_string(),
+        ))
     }
 }
 
@@ -277,5 +524,31 @@ mod tests {
         // Should be normalized
         let norm: f32 = pooled.iter().map(|x| x * x).sum::<f32>().sqrt();
         assert!((norm - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_default_embedder_cache_dir_uses_env_override() {
+        let path = resolve_embedder_cache_dir(
+            Some("custom-cache".to_string()),
+            Some(PathBuf::from("platform-cache")),
+            Some(PathBuf::from("home-dir")),
+        );
+        assert_eq!(path, PathBuf::from("custom-cache"));
+    }
+
+    #[test]
+    fn test_default_embedder_cache_dir_uses_os_cache_dir() {
+        let path = resolve_embedder_cache_dir(
+            None,
+            Some(PathBuf::from("platform-cache")),
+            Some(PathBuf::from("home-dir")),
+        );
+        assert_eq!(path, PathBuf::from("platform-cache/graphrag/fastembed"));
+    }
+
+    #[test]
+    fn test_default_embedder_cache_dir_falls_back_to_home_cache() {
+        let path = resolve_embedder_cache_dir(None, None, Some(PathBuf::from("home-dir")));
+        assert_eq!(path, PathBuf::from("home-dir/.cache/graphrag/fastembed"));
     }
 }
