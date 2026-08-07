@@ -40,7 +40,6 @@ impl PluginCommand for GraphRagInfo {
             nu_protocol::record! {
                 "data_dir" => Value::string(&data_dir, span),
                 "db_path" => Value::string(plugin.db_path.to_string_lossy(), span),
-                "index_dir" => Value::string(plugin.index_dir.to_string_lossy(), span),
                 "env_var" => Value::string("GRAPHRAG_DATA_DIR", span),
             },
             span,

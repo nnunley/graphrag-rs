@@ -5,9 +5,6 @@ pub enum GraphRagError {
     #[error("Database error: {0}")]
     Database(#[from] rusqlite::Error),
 
-    #[error("HNSW index error: {0}")]
-    Hnsw(String),
-
     #[error("Store '{0}' not found")]
     StoreNotFound(String),
 

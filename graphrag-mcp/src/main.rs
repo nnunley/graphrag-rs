@@ -4,9 +4,9 @@
 //! Implements JSON-RPC 2.0 over stdio with sampling support for LLM-powered features.
 
 use graphrag_core::{
-    ChunkerConfig, CodeChunkerConfig, CodeLanguage, Database, Embedder, EmbedderConfig,
-    EmbedderModel, HnswIndex, LexicalIndex, SearchResult, chunk_code,
-    chunk_text as core_chunk_text, default_embedder_cache_dir, leit_fusion,
+    BruteForceVectorSource, ChunkerConfig, CodeChunkerConfig, CodeLanguage, Database, Embedder,
+    EmbedderConfig, EmbedderModel, LexicalIndex, VectorCandidate, VectorCandidateSource,
+    chunk_code, chunk_text as core_chunk_text, default_embedder_cache_dir, leit_fusion,
 };
 use graphrag_llm::{
     EntityTriple, continuation_extraction_prompt, entity_extraction_prompt,
@@ -267,6 +267,9 @@ impl McpServer {
     /// Borrow (and lazily build) the cached LexicalIndex for `store`.
     /// Returns `None` when the store is empty so callers can fall through
     /// to vector-only recall cleanly.
+    // Arc (not Rc) despite LexicalIndex being !Send/!Sync: the server is
+    // single-threaded stdio, and the cache map is already Mutex-guarded.
+    #[allow(clippy::arc_with_non_send_sync)]
     fn cached_lexical_for(
         &self,
         db: &Database,
@@ -305,10 +308,6 @@ impl McpServer {
 
     fn db_path(&self) -> PathBuf {
         self.data_dir.join("graphrag.db")
-    }
-
-    fn index_dir(&self) -> PathBuf {
-        self.data_dir.join("indexes")
     }
 
     fn next_request_id() -> u64 {
@@ -1342,25 +1341,8 @@ impl McpServer {
         // so we'd otherwise serve N-1 stale recalls during a single ingest.
         self.invalidate_lexical(&store_name);
 
-        // Add to HNSW index
-        let index_path = self.index_dir().join(format!("{}.usearch", store_name));
-        let hnsw = match HnswIndex::load(&index_path, store.dim) {
-            Ok(h) => h,
-            Err(_) => match HnswIndex::new(store.dim) {
-                Ok(h) => h,
-                Err(e) => {
-                    self.send_final_response(self.tool_error(original_id, e.to_string()), stdout);
-                    return;
-                }
-            },
-        };
-
-        if let Err(e) = hnsw.add(chunk_id as u64, &embedding) {
-            self.send_final_response(self.tool_error(original_id, e.to_string()), stdout);
-            return;
-        }
-
-        if let Err(e) = hnsw.save(&index_path) {
+        // Store the canonical embedding
+        if let Err(e) = db.set_chunk_embedding(chunk_id, &embedding) {
             self.send_final_response(self.tool_error(original_id, e.to_string()), stdout);
             return;
         }
@@ -1579,17 +1561,16 @@ impl McpServer {
             );
         }
 
-        // Hybrid recall: HNSW (semantic) ∪ leit BM25 (lexical), fused via RRF.
+        // Hybrid recall: brute-force cosine (semantic) ∪ leit BM25 (lexical), fused via RRF.
         // Pull candidate_k per lane so RRF has overlap to fuse over.
         let candidate_k = top.max(5) * 4;
 
-        let index_path = self.index_dir().join(format!("{}.usearch", store_name));
-        let vector_hits = match HnswIndex::load(&index_path, store.dim) {
-            Ok(hnsw) => match hnsw.search(&embedding, candidate_k) {
+        let vector_hits = match BruteForceVectorSource::for_store(&db, &store_name) {
+            Ok(source) => match source.top_candidates(&embedding, candidate_k) {
                 Ok(r) => r,
                 Err(e) => return self.tool_error(id, e.to_string()),
             },
-            Err(_) => Vec::new(),
+            Err(e) => return self.tool_error(id, e.to_string()),
         };
 
         let lexical_hits = match self.cached_lexical_for(&db, &store_name) {
@@ -1608,7 +1589,7 @@ impl McpServer {
         let vector_ranked: Vec<leit_fusion::RankedResult> = vector_hits
             .iter()
             .enumerate()
-            .map(|(i, h)| leit_fusion::RankedResult::new(h.key.to_string(), i + 1))
+            .map(|(i, h)| leit_fusion::RankedResult::new(h.chunk_id.to_string(), i + 1))
             .collect();
         let lexical_ranked: Vec<leit_fusion::RankedResult> = lexical_hits
             .iter()
@@ -1617,16 +1598,16 @@ impl McpServer {
             .collect();
         let fused = leit_fusion::fuse_default(&[vector_ranked, lexical_ranked]);
 
-        // Translate fused output back into SearchResult so the existing
+        // Translate fused output back into VectorCandidate so the existing
         // format_search_results + graph-expansion path keeps working unchanged.
-        // SearchResult.distance is repurposed as the RRF score (higher = better).
-        let results: Vec<SearchResult> = fused
+        // VectorCandidate.score carries the RRF score here (higher = better).
+        let results: Vec<VectorCandidate> = fused
             .iter()
             .take(top)
             .filter_map(|f| {
-                f.id.parse::<u64>().ok().map(|key| SearchResult {
-                    key,
-                    distance: f.score as f32,
+                f.id.parse::<i64>().ok().map(|chunk_id| VectorCandidate {
+                    chunk_id,
+                    score: f.score as f32,
                 })
             })
             .collect();
@@ -2160,13 +2141,12 @@ impl McpServer {
             );
         }
 
-        let index_path = self.index_dir().join(format!("{}.usearch", store_name));
-        let hnsw = match HnswIndex::load(&index_path, store.dim) {
-            Ok(h) => h,
+        let source = match BruteForceVectorSource::for_store(&db, &store_name) {
+            Ok(s) => s,
             Err(e) => return self.tool_error(id, e.to_string()),
         };
 
-        let results = match hnsw.search(&embedding, top) {
+        let results = match source.top_candidates(&embedding, top) {
             Ok(r) => r,
             Err(e) => return self.tool_error(id, e.to_string()),
         };
@@ -2180,16 +2160,16 @@ impl McpServer {
     fn format_search_results(
         &self,
         db: &Database,
-        results: &[SearchResult],
+        results: &[VectorCandidate],
         expand: usize,
     ) -> Result<String, String> {
         let mut text = String::from("## Search Results\n\n");
         let mut seen_chunks = std::collections::HashSet::new();
         let mut chunk_ids: Vec<i64> = Vec::new();
 
-        for SearchResult { key, distance: _ } in results {
-            seen_chunks.insert(*key);
-            chunk_ids.push(*key as i64);
+        for VectorCandidate { chunk_id, score: _ } in results {
+            seen_chunks.insert(*chunk_id);
+            chunk_ids.push(*chunk_id);
         }
 
         let chunks = db
@@ -2198,9 +2178,11 @@ impl McpServer {
 
         for (chunk, result) in chunks.iter().zip(results.iter()) {
             let source = chunk.source.as_deref().unwrap_or("unknown");
+            // `score` is higher-is-better (cosine similarity for direct
+            // search, RRF score for hybrid recall).
             text.push_str(&format!(
-                "### [{}] (distance: {:.3})\n\n{}\n\n---\n\n",
-                source, result.distance, chunk.content
+                "### [{}] (score: {:.3})\n\n{}\n\n---\n\n",
+                source, result.score, chunk.content
             ));
         }
 
@@ -2212,7 +2194,7 @@ impl McpServer {
                     for entity in entities {
                         if let Ok(related_chunks) = db.get_chunks_for_entity(entity.id) {
                             for related_id in related_chunks {
-                                if !seen_chunks.contains(&(related_id as u64)) {
+                                if !seen_chunks.contains(&related_id) {
                                     expanded_chunk_ids.insert(related_id);
                                 }
                             }

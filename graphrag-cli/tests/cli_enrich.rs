@@ -1,7 +1,7 @@
 use assert_cmd::Command;
 use graphrag_core::Database;
 use predicates::str::contains;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn temp_data_dir(label: &str) -> PathBuf {
     let pid = std::process::id();
@@ -14,7 +14,7 @@ fn temp_data_dir(label: &str) -> PathBuf {
     dir
 }
 
-fn seed_graph(data_dir: &PathBuf) -> Database {
+fn seed_graph(data_dir: &Path) -> Database {
     let db = Database::open(&data_dir.join("graphrag.db")).expect("db opens");
     db.create_store("conversations", 768)
         .expect("store created");

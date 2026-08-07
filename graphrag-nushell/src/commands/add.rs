@@ -2,7 +2,6 @@ use crate::GraphRagPlugin;
 use crate::error_ext::GraphRagErrorExt;
 use graphrag_core::Database;
 use graphrag_core::GraphRagError;
-use graphrag_core::HnswIndex;
 use nu_plugin::{EngineInterface, EvaluatedCall, PluginCommand};
 use nu_protocol::{Category, PipelineData, Record, Signature, SyntaxShape, Type, Value};
 
@@ -49,15 +48,10 @@ impl PluginCommand for GraphRagAdd {
             .get_store(&store_name)
             .map_err(|e| e.into_labeled_error(span))?;
 
-        // Load or create HNSW index
-        let index_path = plugin.index_dir.join(format!("{}.usearch", store_name));
-        let hnsw =
-            HnswIndex::load(&index_path, store.dim).map_err(|e| e.into_labeled_error(span))?;
-
         // Process input
         let result = match input {
             PipelineData::Value(Value::Record { val, .. }, _) => {
-                let chunk_id = process_record(&db, &hnsw, &store_name, store.dim, &val, span)
+                let chunk_id = process_record(&db, &store_name, store.dim, &val, span)
                     .map_err(|e| e.into_labeled_error(span))?;
 
                 Value::record(
@@ -72,9 +66,8 @@ impl PluginCommand for GraphRagAdd {
                 let mut results = Vec::new();
                 for val in vals {
                     if let Value::Record { val: record, .. } = val {
-                        let chunk_id =
-                            process_record(&db, &hnsw, &store_name, store.dim, &record, span)
-                                .map_err(|e| e.into_labeled_error(span))?;
+                        let chunk_id = process_record(&db, &store_name, store.dim, &record, span)
+                            .map_err(|e| e.into_labeled_error(span))?;
 
                         results.push(Value::record(
                             nu_protocol::record! {
@@ -94,17 +87,12 @@ impl PluginCommand for GraphRagAdd {
             }
         };
 
-        // Save the updated index
-        hnsw.save(&index_path)
-            .map_err(|e| e.into_labeled_error(span))?;
-
         Ok(PipelineData::Value(result, None))
     }
 }
 
 fn process_record(
     db: &Database,
-    hnsw: &HnswIndex,
     store_name: &str,
     expected_dim: usize,
     record: &Record,
@@ -150,8 +138,8 @@ fn process_record(
     // Add chunk to database
     let chunk_id = db.add_chunk(store_name, content, source, metadata.as_deref())?;
 
-    // Add embedding to HNSW index
-    hnsw.add(chunk_id as u64, &embedding)?;
+    // Store the canonical embedding
+    db.set_chunk_embedding(chunk_id, &embedding)?;
 
     // Process entities if provided
     if let Some(Value::List { vals, .. }) = record.get("entities") {

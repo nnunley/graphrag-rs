@@ -2,7 +2,7 @@
 name = "graphrag-core"
 version = "0.1.0"
 edition = "2024"
-description = "GraphRAG core library - knowledge graph with HNSW vector search and community detection"
+description = "GraphRAG core library - knowledge graph with exact vector search and community detection"
 license = "MIT"
 
 [lib]
@@ -18,7 +18,6 @@ code = ["text-splitter/code", "tree-sitter-rust", "tree-sitter-python", "tree-si
 
 [dependencies]
 rusqlite = { version = "0.32", features = ["bundled"] }
-usearch = "2.15"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"

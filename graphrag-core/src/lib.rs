@@ -1,11 +1,11 @@
 //! GraphRAG Core Library
 //!
-//! A knowledge graph system combining HNSW vector search with entity-relation
+//! A knowledge graph system combining exact vector search with entity-relation
 //! extraction and community detection using the Leiden algorithm.
 //!
 //! ## Features
 //!
-//! - **Vector Search**: Fast approximate nearest neighbor search using HNSW (usearch)
+//! - **Vector Search**: Exact brute-force cosine search over canonical SQLite embeddings
 //! - **Knowledge Graph**: Entity-relation storage with typed entities
 //! - **Community Detection**: Leiden algorithm for discovering entity clusters
 //! - **Graph Expansion**: Follow relations to discover related content
@@ -16,30 +16,30 @@
 //! ┌─────────────────────────────────────────────┐
 //! │              graphrag-core                   │
 //! ├─────────────┬─────────────┬─────────────────┤
-//! │   Database  │    HNSW     │    Leiden       │
-//! │   (SQLite)  │  (usearch)  │  (communities)  │
+//! │   Database  │   Vectors   │    Leiden       │
+//! │   (SQLite)  │ (bruteforce)│  (communities)  │
 //! └─────────────┴─────────────┴─────────────────┘
 //! ```
 //!
 //! ## Usage
 //!
 //! ```rust,ignore
-//! use graphrag_core::{Database, HnswIndex};
+//! use graphrag_core::{BruteForceVectorSource, Database, VectorCandidateSource};
 //! use std::path::Path;
 //!
-//! // Open database and index
+//! // Open database
 //! let db = Database::open(Path::new("data/graphrag.db"))?;
-//! let index = HnswIndex::load(Path::new("data/store.usearch"), 768)?;
 //!
 //! // Create a store
 //! let store = db.create_store("documents", 768)?;
 //!
 //! // Add content with embedding
 //! let chunk_id = db.add_chunk("documents", "Hello world", Some("source"), None)?;
-//! index.add(chunk_id as u64, &embedding)?;
+//! db.set_chunk_embedding(chunk_id, &embedding)?;
 //!
-//! // Search
-//! let results = index.search(&query_embedding, 10)?;
+//! // Search (cosine similarity, higher is better)
+//! let source = BruteForceVectorSource::for_store(&db, "documents")?;
+//! let results = source.top_candidates(&query_embedding, 10)?;
 //! ```
 
 pub mod capsule;
@@ -47,7 +47,6 @@ pub mod capsule_store;
 pub mod db;
 pub mod entity_types;
 pub mod error;
-pub mod hnsw;
 pub mod leiden;
 pub mod lexical;
 pub mod synonyms;
@@ -73,7 +72,6 @@ pub use entity_types::{
     load_standard_type_synonyms,
 };
 pub use error::GraphRagError;
-pub use hnsw::{HnswIndex, SearchResult};
 pub use lexical::LexicalIndex;
 pub use vector_source::{BruteForceVectorSource, VectorCandidate, VectorCandidateSource};
 

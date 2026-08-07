@@ -39,13 +39,6 @@ impl PluginCommand for GraphRagDelete {
         db.delete_store(&name)
             .map_err(|e| e.into_labeled_error(span))?;
 
-        // Delete HNSW index file if it exists
-        let index_path = plugin.index_dir.join(format!("{}.usearch", name));
-        if index_path.exists() {
-            std::fs::remove_file(&index_path)
-                .map_err(|e| graphrag_core::GraphRagError::Io(e).into_labeled_error(span))?;
-        }
-
         Ok(PipelineData::Value(Value::nothing(span), None))
     }
 }
