@@ -52,7 +52,17 @@ Go consumers (agent-sandbox `queue.CapsuleRef`) test this exact JSON:
 `CapsuleRef` serde roundtrips this byte-exactly (field order is struct
 declaration order).
 
+## Persistence
+
+`CapsuleStore` (in `graphrag_core::capsule`) is the provider contract:
+idempotent `put_capsule` keyed by `(capsule_id, content_fingerprint)`,
+`latest_capsule`, `capsule_by_fingerprint`, newest-first `capsule_history`,
+and project-filtered `list_capsules`. The SQLite provider
+(`graphrag_core::capsule_store`, implemented on `Database`) stores the exact
+canonical JSON bytes that were fingerprinted in an append-only `capsules`
+table and verifies the fingerprint on every read before deserializing.
+
 ## Out of scope for v1
 
-Persistence in the graphrag database, LLM synthesis of capsule content, stale
-refresh triggers, and segment/portfolio capsule bodies are separate segments.
+LLM synthesis of capsule content, stale refresh triggers, and
+segment/portfolio capsule bodies are separate segments.

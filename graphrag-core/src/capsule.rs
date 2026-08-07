@@ -314,6 +314,35 @@ fn check_timestamp(field: &'static str, value: &str) -> Result<(), CapsuleError>
     }
 }
 
+/// Storage provider contract for capsules.
+///
+/// Providers persist validated capsule bodies keyed by `capsule_id`, retain
+/// the full fingerprint history, and hand out [`CapsuleRef`]s. `put` must be
+/// idempotent per `(capsule_id, content_fingerprint)`.
+pub trait CapsuleStore {
+    type Error;
+
+    /// Validate and persist a capsule; returns its reference. Storing the
+    /// same capsule bytes twice is a no-op returning the same reference.
+    fn put_capsule(&self, capsule: &ProjectCapsuleV1) -> Result<CapsuleRef, Self::Error>;
+
+    /// The most recently stored version for `capsule_id`, if any.
+    fn latest_capsule(&self, capsule_id: &str) -> Result<Option<ProjectCapsuleV1>, Self::Error>;
+
+    /// A specific stored version by content fingerprint.
+    fn capsule_by_fingerprint(
+        &self,
+        capsule_id: &str,
+        content_fingerprint: &str,
+    ) -> Result<Option<ProjectCapsuleV1>, Self::Error>;
+
+    /// All stored references for `capsule_id`, newest first.
+    fn capsule_history(&self, capsule_id: &str) -> Result<Vec<CapsuleRef>, Self::Error>;
+
+    /// Latest reference per capsule, optionally filtered by project.
+    fn list_capsules(&self, project_id: Option<&str>) -> Result<Vec<CapsuleRef>, Self::Error>;
+}
+
 /// Build the canonical capsule URI for a kind and id.
 pub fn capsule_uri(kind: CapsuleKind, capsule_id: &str) -> String {
     format!("graphrag://capsules/v1/{}/{}", kind.as_str(), capsule_id)
