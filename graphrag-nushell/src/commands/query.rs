@@ -1,7 +1,7 @@
 use crate::GraphRagPlugin;
 use crate::error_ext::GraphRagErrorExt;
 use graphrag_core::Database;
-use graphrag_core::HnswIndex;
+use graphrag_core::{BruteForceVectorSource, VectorCandidateSource};
 use nu_plugin::{EngineInterface, EvaluatedCall, PluginCommand};
 use nu_protocol::{Category, PipelineData, Signature, SyntaxShape, Type, Value};
 use std::collections::HashSet;
@@ -72,21 +72,18 @@ impl PluginCommand for GraphRagQuery {
 
         let db = Database::open(&plugin.db_path).map_err(|e| e.into_labeled_error(span))?;
 
-        let store = db
+        let _store = db
             .get_store(&store_name)
             .map_err(|e| e.into_labeled_error(span))?;
 
-        // Load HNSW index
-        let index_path = plugin.index_dir.join(format!("{}.usearch", store_name));
-        let hnsw =
-            HnswIndex::load(&index_path, store.dim).map_err(|e| e.into_labeled_error(span))?;
-
-        // Step 1: Vector search
-        let vector_results = hnsw
-            .search(&embedding, top_k)
+        // Step 1: Vector search (cosine similarity, higher = better)
+        let source = BruteForceVectorSource::for_store(&db, &store_name)
+            .map_err(|e| e.into_labeled_error(span))?;
+        let vector_results = source
+            .top_candidates(&embedding, top_k)
             .map_err(|e| e.into_labeled_error(span))?;
 
-        let initial_chunk_ids: Vec<i64> = vector_results.iter().map(|r| r.key as i64).collect();
+        let initial_chunk_ids: Vec<i64> = vector_results.iter().map(|r| r.chunk_id).collect();
 
         // Step 2: Get entities from initial chunks
         let mut all_entity_ids: HashSet<i64> = HashSet::new();
@@ -146,11 +143,11 @@ impl PluginCommand for GraphRagQuery {
         let chunk_values: Vec<Value> = chunks
             .iter()
             .map(|chunk| {
-                // Find distance if this was in initial results
-                let distance = vector_results
+                // Find similarity score if this was in initial results
+                let score = vector_results
                     .iter()
-                    .find(|r| r.key as i64 == chunk.id)
-                    .map(|r| r.distance as f64);
+                    .find(|r| r.chunk_id == chunk.id)
+                    .map(|r| r.score as f64);
 
                 let from_graph = !initial_chunk_ids.contains(&chunk.id);
 
@@ -161,8 +158,8 @@ impl PluginCommand for GraphRagQuery {
                         "source" => chunk.source.as_ref()
                             .map(|s| Value::string(s, span))
                             .unwrap_or(Value::nothing(span)),
-                        "distance" => distance
-                            .map(|d| Value::float(d, span))
+                        "score" => score
+                            .map(|s| Value::float(s, span))
                             .unwrap_or(Value::nothing(span)),
                         "from_graph" => Value::bool(from_graph, span),
                     },

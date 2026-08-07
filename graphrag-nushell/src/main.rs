@@ -5,7 +5,6 @@ use nu_plugin::{MsgPackSerializer, Plugin, PluginCommand, serve_plugin};
 
 pub struct GraphRagPlugin {
     db_path: std::path::PathBuf,
-    index_dir: std::path::PathBuf,
 }
 
 impl GraphRagPlugin {
@@ -22,7 +21,6 @@ impl GraphRagPlugin {
 
         Self {
             db_path: data_dir.join("graphrag.db"),
-            index_dir: data_dir.join("indexes"),
         }
     }
 }

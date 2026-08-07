@@ -1,7 +1,7 @@
 use crate::GraphRagPlugin;
 use crate::error_ext::GraphRagErrorExt;
 use graphrag_core::Database;
-use graphrag_core::HnswIndex;
+use graphrag_core::{BruteForceVectorSource, VectorCandidateSource};
 use nu_plugin::{EngineInterface, EvaluatedCall, PluginCommand};
 use nu_protocol::{Category, PipelineData, Signature, SyntaxShape, Type, Value};
 
@@ -65,22 +65,19 @@ impl PluginCommand for GraphRagSearch {
         let db = Database::open(&plugin.db_path).map_err(|e| e.into_labeled_error(span))?;
 
         // Verify store exists
-        let store = db
+        let _store = db
             .get_store(&store_name)
             .map_err(|e| e.into_labeled_error(span))?;
 
-        // Load HNSW index
-        let index_path = plugin.index_dir.join(format!("{}.usearch", store_name));
-        let hnsw =
-            HnswIndex::load(&index_path, store.dim).map_err(|e| e.into_labeled_error(span))?;
-
-        // Search
-        let results = hnsw
-            .search(&embedding, top_k)
+        // Search (cosine similarity, higher = better)
+        let source = BruteForceVectorSource::for_store(&db, &store_name)
+            .map_err(|e| e.into_labeled_error(span))?;
+        let results = source
+            .top_candidates(&embedding, top_k)
             .map_err(|e| e.into_labeled_error(span))?;
 
         // Get chunk details
-        let chunk_ids: Vec<i64> = results.iter().map(|r| r.key as i64).collect();
+        let chunk_ids: Vec<i64> = results.iter().map(|r| r.chunk_id).collect();
         let chunks = db
             .get_chunks_by_ids(&chunk_ids)
             .map_err(|e| e.into_labeled_error(span))?;
@@ -89,11 +86,11 @@ impl PluginCommand for GraphRagSearch {
         let values: Vec<Value> = results
             .iter()
             .filter_map(|result| {
-                let chunk = chunks.iter().find(|c| c.id == result.key as i64)?;
+                let chunk = chunks.iter().find(|c| c.id == result.chunk_id)?;
                 Some(Value::record(
                     nu_protocol::record! {
                         "chunk_id" => Value::int(chunk.id, span),
-                        "distance" => Value::float(result.distance as f64, span),
+                        "score" => Value::float(result.score as f64, span),
                         "content" => Value::string(&chunk.content, span),
                         "source" => chunk.source.as_ref()
                             .map(|s| Value::string(s, span))

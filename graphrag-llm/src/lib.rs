@@ -320,7 +320,10 @@ pub struct TripleLineStrategy;
 fn split_typed(s: &str) -> (String, Option<String>) {
     let s = s.trim();
     // `name (type)` → strip the trailing ')', split at the last '(': name before, type after.
-    match s.strip_suffix(')').and_then(|inner| inner.rfind('(').map(|i| (i, inner))) {
+    match s
+        .strip_suffix(')')
+        .and_then(|inner| inner.rfind('(').map(|i| (i, inner)))
+    {
         Some((i, inner)) => {
             let name = inner[..i].trim().to_string();
             let ty = inner[i + 1..].trim().to_string();
@@ -339,7 +342,13 @@ fn parse_triple_line(line: &str) -> Option<EntityTriple> {
     if head.is_empty() || tail.is_empty() || relation.trim().is_empty() {
         return None;
     }
-    Some(EntityTriple { head, head_type, relation: relation.trim().to_string(), tail, tail_type })
+    Some(EntityTriple {
+        head,
+        head_type,
+        relation: relation.trim().to_string(),
+        tail,
+        tail_type,
+    })
 }
 
 const TRIPLE_LINE_SYSTEM: &str = r#"You are an entity extraction system. Extract entities and their relationships from the text.
@@ -377,7 +386,8 @@ impl ExtractionStrategy for TripleLineStrategy {
         let mut malformed = 0usize;
         for line in response.lines() {
             let l = line.trim();
-            if l.is_empty() || l.starts_with('#') || l.starts_with("//") || l.starts_with("Example") {
+            if l.is_empty() || l.starts_with('#') || l.starts_with("//") || l.starts_with("Example")
+            {
                 continue;
             }
             match parse_triple_line(l) {
@@ -402,8 +412,14 @@ impl ExtractionStrategy for JsonStrategy {
     }
     fn parse(&self, response: &str) -> ParsedExtraction {
         match parse_entity_extraction(response) {
-            Ok(e) => ParsedExtraction { triples: e.entities, malformed: 0 },
-            Err(_) => ParsedExtraction { triples: Vec::new(), malformed: 1 },
+            Ok(e) => ParsedExtraction {
+                triples: e.entities,
+                malformed: 0,
+            },
+            Err(_) => ParsedExtraction {
+                triples: Vec::new(),
+                malformed: 1,
+            },
         }
     }
     fn response_format(&self) -> Option<Value> {
@@ -420,8 +436,10 @@ struct StrategyRule {
 
 /// Model→strategy rules (2026-08-03 extraction spike). First case-insensitive substring match
 /// wins; the default (triple-lines) is validated best for qwen/gemma-class models.
-static MODEL_STRATEGY_RULES: &[StrategyRule] =
-    &[StrategyRule { model_substr: "nemotron", make: || Box::new(JsonStrategy) }];
+static MODEL_STRATEGY_RULES: &[StrategyRule] = &[StrategyRule {
+    model_substr: "nemotron",
+    make: || Box::new(JsonStrategy),
+}];
 
 /// Resolve a model name to its best-performing extraction strategy.
 pub fn strategy_for_model(model: &str) -> Box<dyn ExtractionStrategy> {
@@ -489,19 +507,36 @@ mod tests {
         let client = OllamaChatClient::new("http://localhost:11434", "qwen3.6-hermes");
         let prompt = entity_extraction_prompt("x", 0, 1);
         let req = client.chat_request(&prompt, None);
-        assert!(req.get("format").is_none(), "no format constraint when strategy supplies none");
+        assert!(
+            req.get("format").is_none(),
+            "no format constraint when strategy supplies none"
+        );
         let req2 = client.chat_request(&prompt, Some(entity_extraction_json_schema()));
-        assert_eq!(req2["format"]["type"], "object", "format applied when supplied");
+        assert_eq!(
+            req2["format"]["type"], "object",
+            "format applied when supplied"
+        );
     }
 
     #[test]
     fn strategy_for_model_resolves_per_model() {
         // 2026-08-03 spike: nemotron-class → JSON; qwen/gemma/default → triple-lines.
         assert_eq!(strategy_for_model("nemotron3:33b").name(), "json");
-        assert_eq!(strategy_for_model("Nemotron-4-large").name(), "json", "case-insensitive");
-        assert_eq!(strategy_for_model("qwen3.6-hermes:latest").name(), "triple-lines");
+        assert_eq!(
+            strategy_for_model("Nemotron-4-large").name(),
+            "json",
+            "case-insensitive"
+        );
+        assert_eq!(
+            strategy_for_model("qwen3.6-hermes:latest").name(),
+            "triple-lines"
+        );
         assert_eq!(strategy_for_model("gemma4:31b").name(), "triple-lines");
-        assert_eq!(strategy_for_model("some-unknown-model").name(), "triple-lines", "default");
+        assert_eq!(
+            strategy_for_model("some-unknown-model").name(),
+            "triple-lines",
+            "default"
+        );
     }
 
     #[test]
@@ -516,7 +551,10 @@ mod tests {
         assert_eq!(parsed.triples.len(), 1);
         assert_eq!(parsed.triples[0].head, "Alice");
         assert_eq!(parsed.malformed, 0);
-        assert!(s.response_format().is_some(), "JSON strategy constrains via response_format");
+        assert!(
+            s.response_format().is_some(),
+            "JSON strategy constrains via response_format"
+        );
     }
 
     #[test]
@@ -524,7 +562,10 @@ mod tests {
         let s = JsonStrategy;
         let parsed = s.parse("not json at all");
         assert_eq!(parsed.triples.len(), 0);
-        assert_eq!(parsed.malformed, 1, "a broken JSON blob loses the whole chunk (malformed=1)");
+        assert_eq!(
+            parsed.malformed, 1,
+            "a broken JSON blob loses the whole chunk (malformed=1)"
+        );
     }
 
     #[test]
@@ -532,13 +573,22 @@ mod tests {
         let s = TripleLineStrategy;
         let p = s.build_prompt("Norman chose tokio.", 1, 3);
         let full = format!("{}\n{}", p.system, p.user);
-        assert!(full.contains("-["), "teaches the head -[relation]-> tail format");
+        assert!(
+            full.contains("-["),
+            "teaches the head -[relation]-> tail format"
+        );
         assert!(
             full.contains("Software") && full.contains("Person"),
             "lists canonical entity types"
         );
-        assert!(full.to_lowercase().contains("example"), "has a worked example");
-        assert!(p.user.contains("Norman chose tokio."), "includes the chunk text");
+        assert!(
+            full.to_lowercase().contains("example"),
+            "has a worked example"
+        );
+        assert!(
+            p.user.contains("Norman chose tokio."),
+            "includes the chunk text"
+        );
         // Single-block: the core format instruction appears exactly once (no sandwich for extract).
         assert_eq!(
             full.matches("ONE triple per line").count(),

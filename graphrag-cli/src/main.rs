@@ -1,8 +1,8 @@
 use clap::{Parser, Subcommand};
 use graphrag_core::{
-    CommunityGraph, Database, Embedder, EmbedderConfig, EmbedderModel, HnswIndex, LexicalIndex,
-    RemoteEmbedderConfig, default_embedder_cache_dir, load_standard_synonyms,
-    load_standard_type_synonyms,
+    BruteForceVectorSource, CommunityGraph, Database, Embedder, EmbedderConfig, EmbedderModel,
+    LexicalIndex, RemoteEmbedderConfig, VectorCandidateSource, default_embedder_cache_dir,
+    load_standard_synonyms, load_standard_type_synonyms,
 };
 use graphrag_llm::{ChatClient, EntityTriple, OllamaChatClient, strategy_for_model};
 use std::collections::HashMap;
@@ -109,12 +109,6 @@ impl StoragePaths {
         self.data_dir.join("graphrag.db")
     }
 
-    fn index_path(&self, store: &str) -> PathBuf {
-        self.data_dir
-            .join("indexes")
-            .join(format!("{store}.usearch"))
-    }
-
     /// Forward-compat sidecar for leit Phase 2 cursor-based persistence.
     /// Today these bytes can't be reloaded into a searchable index — we
     /// write them anyway so the on-disk format is in place when leit ships
@@ -213,14 +207,8 @@ where
     let chunk_id = db
         .add_chunk(store, text, source, None)
         .map_err(|e| format!("add chunk: {e}"))?;
-    let index_path = paths.index_path(store);
-    let hnsw = HnswIndex::load(&index_path, store_record.dim)
-        .or_else(|_| HnswIndex::new(store_record.dim))
-        .map_err(|e| format!("open index: {e}"))?;
-    hnsw.add(chunk_id as u64, &embedding)
-        .map_err(|e| format!("index chunk: {e}"))?;
-    hnsw.save(&index_path)
-        .map_err(|e| format!("save index: {e}"))?;
+    db.set_chunk_embedding(chunk_id, &embedding)
+        .map_err(|e| format!("store embedding: {e}"))?;
     rebuild_lexical_sidecar(paths, &db, store)?;
     Ok(chunk_id)
 }
@@ -278,10 +266,6 @@ where
     let chunks = db
         .list_chunks(store)
         .map_err(|e| format!("list chunks: {e}"))?;
-    let hnsw = HnswIndex::new(store_record.dim).map_err(|e| format!("create index: {e}"))?;
-    hnsw.reserve(chunks.len())
-        .map_err(|e| format!("reserve index: {e}"))?;
-
     for (idx, chunk) in chunks.iter().enumerate() {
         let embedding = embed(&chunk.content)?;
         if embedding.len() != store_record.dim {
@@ -292,21 +276,19 @@ where
                 embedding.len()
             ));
         }
-        hnsw.add(chunk.id as u64, &embedding)
-            .map_err(|e| format!("index chunk {}: {e}", chunk.id))?;
+        db.set_chunk_embedding(chunk.id, &embedding)
+            .map_err(|e| format!("store embedding for chunk {}: {e}", chunk.id))?;
         let completed = idx + 1;
         if completed == chunks.len() || completed % 25 == 0 {
             eprintln!("backfilled {completed}/{} chunks", chunks.len());
         }
     }
 
-    hnsw.save(&paths.index_path(store))
-        .map_err(|e| format!("save index: {e}"))?;
     Ok(chunks.len())
 }
 
 fn cmd_ask(query: &str, top: usize, store: &str) -> Result<(), String> {
-    // Hybrid recall: HNSW (semantic) + leit BM25 (lexical), fused via RRF.
+    // Hybrid recall: brute-force cosine (semantic) + leit BM25 (lexical), fused via RRF.
     //
     // Mirrors the MCP server's tool_recall in shape (same embedder, same
     // chunk store), but stays CLI-shaped: rebuild the leit index per
@@ -318,7 +300,7 @@ fn cmd_ask(query: &str, top: usize, store: &str) -> Result<(), String> {
         Err(_) => return Ok(()),
     };
 
-    // --- Lane 1: HNSW vector recall ---
+    // --- Lane 1: exact vector recall ---
     let embedder = open_embedder()?;
     let embedding = embedder.embed(query).map_err(|e| e.to_string())?;
     if embedding.len() != store_record.dim {
@@ -328,15 +310,13 @@ fn cmd_ask(query: &str, top: usize, store: &str) -> Result<(), String> {
             store_record.dim
         ));
     }
-    let index_path = paths.index_path(store);
     // Pull a larger candidate pool than `top` so RRF has overlap to fuse.
     let candidate_k = top.max(5) * 4;
-    let vector_hits = match HnswIndex::load(&index_path, store_record.dim) {
-        Ok(hnsw) => hnsw
-            .search(&embedding, candidate_k)
-            .map_err(|e| format!("vector search: {e}"))?,
-        Err(_) => Vec::new(), // No HNSW index yet — degrade to lexical-only.
-    };
+    let vector_source =
+        BruteForceVectorSource::for_store(&db, store).map_err(|e| format!("load vectors: {e}"))?;
+    let vector_hits = vector_source
+        .top_candidates(&embedding, candidate_k)
+        .map_err(|e| format!("vector search: {e}"))?;
 
     // --- Lane 2: leit BM25 recall (rebuild per query) ---
     let chunks_all = db
@@ -359,7 +339,7 @@ fn cmd_ask(query: &str, top: usize, store: &str) -> Result<(), String> {
     let vector_ranked: Vec<graphrag_core::leit_fusion::RankedResult> = vector_hits
         .iter()
         .enumerate()
-        .map(|(i, h)| graphrag_core::leit_fusion::RankedResult::new(h.key.to_string(), i + 1))
+        .map(|(i, h)| graphrag_core::leit_fusion::RankedResult::new(h.chunk_id.to_string(), i + 1))
         .collect();
     let lexical_ranked: Vec<graphrag_core::leit_fusion::RankedResult> = lexical_hits
         .iter()
@@ -381,7 +361,8 @@ fn cmd_ask(query: &str, top: usize, store: &str) -> Result<(), String> {
         chunks.iter().map(|c| (c.id, c)).collect();
     // Also surface per-lane source/score for transparency during the
     // hybrid-recall bringup. Drop these badges once the tuning is stable.
-    let vec_lookup: HashMap<u64, f32> = vector_hits.iter().map(|h| (h.key, h.distance)).collect();
+    // `vec=` is cosine similarity (higher = better), from BruteForceVectorSource.
+    let vec_lookup: HashMap<i64, f32> = vector_hits.iter().map(|h| (h.chunk_id, h.score)).collect();
     let lex_lookup: HashMap<i64, f32> = lexical_hits.iter().copied().collect();
     for (rank, f) in fused.iter().take(top).enumerate() {
         let Ok(id) = f.id.parse::<i64>() else {
@@ -392,8 +373,8 @@ fn cmd_ask(query: &str, top: usize, store: &str) -> Result<(), String> {
         };
         let src = chunk.source.as_deref().unwrap_or("-");
         let vec_badge = vec_lookup
-            .get(&(id as u64))
-            .map(|d| format!("vec={d:.3}"))
+            .get(&id)
+            .map(|s| format!("vec={s:.3}"))
             .unwrap_or_else(|| "vec=-".to_string());
         let lex_badge = lex_lookup
             .get(&id)
@@ -449,7 +430,12 @@ fn cmd_enrich(
 
     let extracted = if extract {
         let client = OllamaChatClient::from_env()?;
-        Some(extract_entities_for_chunks(&db, store, &client, client.model())?)
+        Some(extract_entities_for_chunks(
+            &db,
+            store,
+            &client,
+            client.model(),
+        )?)
     } else {
         None
     };
@@ -708,15 +694,18 @@ mod tests {
             DEFAULT_STORE,
             fake_embed,
         )
-        .expect("note should write db and index");
+        .expect("note should write db and embedding");
 
         let db = Database::open(&paths.db_path()).expect("db opens");
         let store = db.get_store(DEFAULT_STORE).expect("store exists");
         assert_eq!(store.dim, 3);
 
-        let hnsw = HnswIndex::load(&paths.index_path(DEFAULT_STORE), 3).expect("index loads");
-        let results = hnsw.search(&[1.0, 0.0, 0.0], 1).expect("search works");
-        assert_eq!(results[0].key, chunk_id as u64);
+        let source =
+            BruteForceVectorSource::for_store(&db, DEFAULT_STORE).expect("vector source loads");
+        let results = source
+            .top_candidates(&[1.0, 0.0, 0.0], 1)
+            .expect("search works");
+        assert_eq!(results[0].chunk_id, chunk_id);
     }
 
     #[test]
@@ -732,14 +721,19 @@ mod tests {
             .expect("beta chunk");
 
         let count = cmd_backfill_embeddings_with_embedder(&paths, DEFAULT_STORE, fake_embed)
-            .expect("backfill should rebuild index");
+            .expect("backfill should store embeddings");
 
         assert_eq!(count, 2);
-        let hnsw = HnswIndex::load(&paths.index_path(DEFAULT_STORE), 3).expect("index loads");
-        let alpha = hnsw.search(&[1.0, 0.0, 0.0], 1).expect("alpha search");
-        let beta = hnsw.search(&[0.0, 1.0, 0.0], 1).expect("beta search");
-        assert_eq!(alpha[0].key, alpha_id as u64);
-        assert_eq!(beta[0].key, beta_id as u64);
+        let source =
+            BruteForceVectorSource::for_store(&db, DEFAULT_STORE).expect("vector source loads");
+        let alpha = source
+            .top_candidates(&[1.0, 0.0, 0.0], 1)
+            .expect("alpha search");
+        let beta = source
+            .top_candidates(&[0.0, 1.0, 0.0], 1)
+            .expect("beta search");
+        assert_eq!(alpha[0].chunk_id, alpha_id);
+        assert_eq!(beta[0].chunk_id, beta_id);
     }
 
     #[test]
@@ -752,8 +746,9 @@ mod tests {
             .expect("chunk");
 
         // "nemotron" resolves to JsonStrategy, matching FakeChatClient's JSON output.
-        let extracted = extract_entities_for_chunks(&db, DEFAULT_STORE, &FakeChatClient, "nemotron3:33b")
-            .expect("metadata extraction succeeds");
+        let extracted =
+            extract_entities_for_chunks(&db, DEFAULT_STORE, &FakeChatClient, "nemotron3:33b")
+                .expect("metadata extraction succeeds");
 
         assert_eq!(extracted, 1);
         let alice = db

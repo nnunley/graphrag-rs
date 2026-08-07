@@ -7,7 +7,7 @@
 //! (MCP server, long-lived).
 //!
 //! When leit ships Phase 2 cursor-based persistence, swap [`build_from_chunks`]
-//! for a reload path and add an `.leitseg` sidecar next to the `.usearch` file.
+//! for a reload path and add an `.leitseg` sidecar in the indexes directory.
 
 use crate::db::Chunk;
 use crate::error::GraphRagError;
