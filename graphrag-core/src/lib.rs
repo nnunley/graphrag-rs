@@ -42,6 +42,7 @@
 //! let results = index.search(&query_embedding, 10)?;
 //! ```
 
+pub mod capsule;
 pub mod db;
 pub mod entity_types;
 pub mod error;
@@ -59,6 +60,10 @@ pub mod chunker;
 #[cfg(feature = "code")]
 pub mod code_chunker;
 
+pub use capsule::{
+    CapsuleError, CapsuleKind, CapsuleRef, Commitment, Decision, EvidenceItem, Freshness,
+    NextSegment, OpenThread, ProjectCapsuleV1, ProjectIdentity, VerifiedFact, capsule_uri,
+};
 pub use db::{Chunk, CommunityRecord, Database, Entity, EntityInput, Relation, Store};
 pub use entity_types::{
     CANONICAL_ENTITY_TYPES, STANDARD_TYPE_SYNONYMS, canonical_entity_types,
