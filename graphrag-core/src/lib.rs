@@ -51,6 +51,7 @@ pub mod hnsw;
 pub mod leiden;
 pub mod lexical;
 pub mod synonyms;
+pub mod vector_source;
 
 #[cfg(feature = "embeddings")]
 pub mod embedder;
@@ -74,6 +75,7 @@ pub use entity_types::{
 pub use error::GraphRagError;
 pub use hnsw::{HnswIndex, SearchResult};
 pub use lexical::LexicalIndex;
+pub use vector_source::{BruteForceVectorSource, VectorCandidate, VectorCandidateSource};
 
 pub use leiden::{
     Community, CommunityGraph, CommunityHierarchy, FlatCommunity, HierarchicalResult,

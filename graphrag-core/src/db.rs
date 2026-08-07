@@ -215,6 +215,12 @@ impl Database {
             );
             CREATE INDEX IF NOT EXISTS idx_capsules_project ON capsules(project_id);
 
+            -- Canonical chunk vectors; index files are disposable caches.
+            CREATE TABLE IF NOT EXISTS chunk_embeddings (
+                chunk_id INTEGER PRIMARY KEY REFERENCES chunks(id) ON DELETE CASCADE,
+                embedding BLOB NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS chunks (
                 id INTEGER PRIMARY KEY,
                 store TEXT NOT NULL REFERENCES stores(name) ON DELETE CASCADE,
