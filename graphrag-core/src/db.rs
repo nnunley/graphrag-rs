@@ -187,6 +187,11 @@ impl Database {
         Ok(())
     }
 
+    /// Crate-internal connection access for sibling storage providers.
+    pub(crate) fn conn(&self) -> &Connection {
+        &self.conn
+    }
+
     fn init_schema(&self) -> Result<(), GraphRagError> {
         self.conn.execute_batch(
             r#"
@@ -195,6 +200,20 @@ impl Database {
                 dim INTEGER NOT NULL,
                 created_at TEXT DEFAULT (datetime('now'))
             );
+
+            -- Append-only capsule bodies with full fingerprint history.
+            CREATE TABLE IF NOT EXISTS capsules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                capsule_id TEXT NOT NULL,
+                project_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                content_fingerprint TEXT NOT NULL,
+                generated_at TEXT NOT NULL,
+                body TEXT NOT NULL,
+                created_at TEXT DEFAULT (datetime('now')),
+                UNIQUE(capsule_id, content_fingerprint)
+            );
+            CREATE INDEX IF NOT EXISTS idx_capsules_project ON capsules(project_id);
 
             CREATE TABLE IF NOT EXISTS chunks (
                 id INTEGER PRIMARY KEY,

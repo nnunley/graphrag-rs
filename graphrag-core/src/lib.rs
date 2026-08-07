@@ -43,6 +43,7 @@
 //! ```
 
 pub mod capsule;
+pub mod capsule_store;
 pub mod db;
 pub mod entity_types;
 pub mod error;
@@ -61,8 +62,9 @@ pub mod chunker;
 pub mod code_chunker;
 
 pub use capsule::{
-    CapsuleError, CapsuleKind, CapsuleRef, Commitment, Decision, EvidenceItem, Freshness,
-    NextSegment, OpenThread, ProjectCapsuleV1, ProjectIdentity, VerifiedFact, capsule_uri,
+    CapsuleError, CapsuleKind, CapsuleRef, CapsuleStore, Commitment, Decision, EvidenceItem,
+    Freshness, NextSegment, OpenThread, ProjectCapsuleV1, ProjectIdentity, VerifiedFact,
+    capsule_uri,
 };
 pub use db::{Chunk, CommunityRecord, Database, Entity, EntityInput, Relation, Store};
 pub use entity_types::{
