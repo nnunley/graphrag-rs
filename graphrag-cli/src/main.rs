@@ -81,6 +81,11 @@ enum Commands {
         #[arg(long, default_value_t = 5)]
         min_size: usize,
     },
+    /// Export a store as JSON Lines to stdout
+    Export {
+        /// Store name to export
+        store: String,
+    },
 }
 
 fn data_dir() -> PathBuf {
@@ -605,6 +610,14 @@ fn persist_hierarchical_communities(
     Ok((result.communities.len(), result.depth, top_modularity))
 }
 
+fn cmd_export(store: &str) -> Result<(), String> {
+    let db = open_db()?;
+    let mut stdout = std::io::stdout().lock();
+    graphrag_core::export::export_store(&db, store, &mut stdout)
+        .map_err(|e| format!("export {store}: {e}"))?;
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
@@ -641,6 +654,7 @@ fn main() -> ExitCode {
         Commands::Ask { query, top, store } => {
             cmd_ask(&query, top, store.as_deref().unwrap_or(DEFAULT_STORE))
         }
+        Commands::Export { store } => cmd_export(&store),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

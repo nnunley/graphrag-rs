@@ -47,6 +47,7 @@ pub mod capsule_store;
 pub mod db;
 pub mod entity_types;
 pub mod error;
+pub mod export;
 pub mod leiden;
 pub mod lexical;
 pub mod synonyms;
