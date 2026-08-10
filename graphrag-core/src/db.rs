@@ -523,6 +523,13 @@ impl Database {
 
     // Entity operations
 
+    /// Get or create an entity, matching on a folded key.
+    ///
+    /// Identity is case- and whitespace-insensitive: extractors emit "Leiden
+    /// algorithm", "Leiden Algorithm", and "  leiden algorithm  " for the same
+    /// concept, and treating those as three nodes fragments the graph and
+    /// suppresses the degree that community detection depends on. The first
+    /// display form seen is preserved, so summaries stay readable.
     pub fn get_or_create_entity(
         &self,
         store: &str,
@@ -530,11 +537,14 @@ impl Database {
         entity_type: Option<&str>,
         properties: Option<&str>,
     ) -> Result<i64, GraphRagError> {
-        // Try to get existing
+        let name = name.trim();
+        // Try to get existing (folded match)
         let existing: Option<i64> = self
             .conn
             .query_row(
-                "SELECT id FROM entities WHERE store = ?1 AND name = ?2",
+                "SELECT id FROM entities
+                 WHERE store = ?1 AND LOWER(TRIM(name)) = LOWER(TRIM(?2))
+                 ORDER BY id LIMIT 1",
                 params![store, name],
                 |row| row.get(0),
             )
@@ -1293,6 +1303,52 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn get_or_create_entity_folds_case_and_whitespace() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = Database::open(&dir.path().join("t.db")).unwrap();
+        db.create_store("s", 3).unwrap();
+        let a = db
+            .get_or_create_entity("s", "Leiden algorithm", Some("Software"), None)
+            .unwrap();
+        let b = db
+            .get_or_create_entity("s", "Leiden Algorithm", None, None)
+            .unwrap();
+        let c = db
+            .get_or_create_entity("s", "  leiden algorithm  ", None, None)
+            .unwrap();
+        assert_eq!(a, b, "case variants are one node");
+        assert_eq!(a, c, "surrounding whitespace is not identity");
+        assert_eq!(db.list_entities("s").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn get_or_create_entity_keeps_the_first_seen_display_form() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = Database::open(&dir.path().join("t.db")).unwrap();
+        db.create_store("s", 3).unwrap();
+        db.get_or_create_entity("s", "GraphRAG", None, None)
+            .unwrap();
+        db.get_or_create_entity("s", "graphrag", None, None)
+            .unwrap();
+        let e = db.list_entities("s").unwrap();
+        assert_eq!(e.len(), 1);
+        assert_eq!(
+            e[0].name, "GraphRAG",
+            "folding must not destroy the readable form"
+        );
+    }
+
+    #[test]
+    fn distinct_concepts_are_not_folded_together() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = Database::open(&dir.path().join("t.db")).unwrap();
+        db.create_store("s", 3).unwrap();
+        db.get_or_create_entity("s", "Leiden", None, None).unwrap();
+        db.get_or_create_entity("s", "Louvain", None, None).unwrap();
+        assert_eq!(db.list_entities("s").unwrap().len(), 2);
+    }
+
     use super::*;
 
     fn temp_db() -> (Database, tempfile::TempDir) {
