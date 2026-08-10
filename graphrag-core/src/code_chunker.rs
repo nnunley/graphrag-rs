@@ -109,18 +109,57 @@ pub fn code_spans(
 /// Chunk code, choosing the parser from the file's extension.
 ///
 /// The language hint is the path itself, which is what callers naturally have.
+/// How a file was actually chunked.
+///
+/// Reported rather than inferred, because "no parser for this extension" and
+/// "parsed as Rust" produce different chunk quality and a caller reasoning about
+/// its context budget deserves to know which it got.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChunkStrategy {
+    /// Split on AST boundaries with tree-sitter.
+    Ast(CodeLanguage),
+    /// No parser for this extension; split on line boundaries instead.
+    Lines,
+}
+
+/// Spans plus the strategy that produced them.
+#[derive(Debug, Clone)]
+pub struct CodeChunking {
+    pub spans: Vec<crate::chunker::ChunkSpan>,
+    pub strategy: ChunkStrategy,
+}
+
+/// Chunk source by extension, degrading to line-based splitting when unknown.
+///
+/// An unrecognised extension is not an error. Refusing to chunk a file is worse
+/// than chunking it slightly less well: config, logs, SQL, and every language
+/// without a parser are still worth indexing, and line boundaries are a sound
+/// fallback for text that happens to be code. The strategy is returned so the
+/// caller can tell the difference.
 pub fn code_spans_auto(
     code: &str,
     file_path: &str,
     chunk_size: usize,
-) -> Result<Vec<crate::chunker::ChunkSpan>, String> {
-    let extension = file_path
-        .rsplit('.')
-        .next()
-        .ok_or_else(|| "No file extension found".to_string())?;
-    let language = CodeLanguage::from_extension(extension)
-        .ok_or_else(|| format!("Unsupported file extension: {extension}"))?;
-    code_spans(code, language, chunk_size)
+) -> Result<CodeChunking, String> {
+    let extension = file_path.rsplit('.').next().unwrap_or("");
+    match CodeLanguage::from_extension(extension) {
+        Some(language) => match code_spans(code, language, chunk_size) {
+            Ok(spans) => Ok(CodeChunking {
+                spans,
+                strategy: ChunkStrategy::Ast(language),
+            }),
+            // A parser that exists but fails on this input is still better served
+            // by lines than by refusal.
+            Err(_) => Ok(CodeChunking {
+                spans: crate::chunker::line_spans(code, chunk_size),
+                strategy: ChunkStrategy::Lines,
+            }),
+        },
+        None => Ok(CodeChunking {
+            spans: crate::chunker::line_spans(code, chunk_size),
+            strategy: ChunkStrategy::Lines,
+        }),
+    }
 }
 
 /// The `n`-th code chunk, or `None` when the source yields fewer.
@@ -247,18 +286,44 @@ impl Gamma {
 
     #[test]
     fn code_spans_auto_detects_language_from_path() {
-        let spans = code_spans_auto(RUST_SRC, "src/lib.rs", 120).expect("detects rust");
+        let spans = code_spans_auto(RUST_SRC, "src/lib.rs", 120)
+            .expect("detects rust")
+            .spans;
         let explicit = code_spans(RUST_SRC, CodeLanguage::Rust, 120).expect("explicit");
         assert_eq!(spans, explicit, "auto and explicit must agree");
     }
 
     #[test]
-    fn code_spans_auto_rejects_an_unknown_extension() {
-        let err = code_spans_auto(RUST_SRC, "notes.xyz", 120).unwrap_err();
-        assert!(
-            err.contains("xyz"),
-            "error should name the extension: {err}"
+    fn code_spans_auto_degrades_to_lines_for_an_unknown_extension() {
+        let got = code_spans_auto(RUST_SRC, "notes.xyz", 120).expect("must not refuse");
+        assert_eq!(
+            got.strategy,
+            ChunkStrategy::Lines,
+            "should report the fallback"
         );
+        assert!(
+            !got.spans.is_empty(),
+            "unknown extensions still get chunked"
+        );
+        for s in &got.spans {
+            assert_eq!(
+                &RUST_SRC[s.start..s.end],
+                s.text,
+                "line spans slice exactly"
+            );
+            assert!(
+                s.text.ends_with('\n') || s.end == RUST_SRC.len(),
+                "line fallback must not cut mid-line"
+            );
+        }
+        let joined: String = got.spans.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(joined, RUST_SRC, "fallback chunking is lossless");
+    }
+
+    #[test]
+    fn a_known_extension_still_reports_ast_chunking() {
+        let got = code_spans_auto(RUST_SRC, "lib.rs", 120).expect("chunks");
+        assert_eq!(got.strategy, ChunkStrategy::Ast(CodeLanguage::Rust));
     }
 
     #[test]

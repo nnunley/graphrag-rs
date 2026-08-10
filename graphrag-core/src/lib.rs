@@ -97,11 +97,12 @@ pub use embedder::{
 #[cfg(feature = "chunking")]
 pub use chunker::{
     ChunkError, ChunkSpan, ChunkerConfig, chunk_markdown, chunk_plain, chunk_spans, chunk_text,
-    fingerprint_of, fingerprint_wide, nth_chunk, nth_chunk_verified, review_spans,
+    fingerprint_of, fingerprint_wide, line_spans, nth_chunk, nth_chunk_verified, resize_span,
+    review_spans,
 };
 
 #[cfg(feature = "code")]
 pub use code_chunker::{
-    CodeChunkerConfig, CodeLanguage, chunk_code, chunk_code_auto, code_spans, code_spans_auto,
-    nth_code_chunk, supported_extensions, supported_languages,
+    ChunkStrategy, CodeChunkerConfig, CodeChunking, CodeLanguage, chunk_code, chunk_code_auto,
+    code_spans, code_spans_auto, nth_code_chunk, supported_extensions, supported_languages,
 };

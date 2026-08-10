@@ -11,7 +11,8 @@
 //! unsupported extension that should error) exposed it.
 
 use graphrag_core::chunker::{
-    ChunkerConfig, chunk_spans, fingerprint_of, nth_chunk, nth_chunk_verified,
+    ChunkerConfig, chunk_spans, fingerprint_of, line_spans, nth_chunk, nth_chunk_verified,
+    resize_span,
 };
 use hegel::TestCase;
 use hegel::generators as gs;
@@ -121,4 +122,51 @@ fn chunking_is_deterministic(mut tc: TestCase) {
         chunk_spans(&text, &cfg),
         "same input and config must always yield the same spans"
     );
+}
+
+#[hegel::test]
+fn line_chunking_is_lossless_and_never_splits_a_line(tc: TestCase) {
+    let text = tc.draw(gs::text().max_size(4000));
+    let budget = tc.draw(gs::integers::<usize>().min_value(1).max_value(500));
+    let spans = line_spans(&text, budget);
+    let joined: String = spans.iter().map(|s| s.text.as_str()).collect();
+    assert_eq!(
+        joined, text,
+        "concatenating line spans must reproduce the source"
+    );
+    for s in &spans {
+        assert_eq!(&text[s.start..s.end], s.text);
+        let body = s.text.trim_end_matches('\n');
+        // within budget, or a single line that alone exceeds it
+        assert!(
+            s.len() <= budget || !body.contains('\n'),
+            "an over-budget chunk must be one indivisible line"
+        );
+    }
+}
+
+#[hegel::test]
+fn resize_is_total_and_always_slices_exactly(tc: TestCase) {
+    let text = tc.draw(gs::text().max_size(2000));
+    let budget = tc.draw(gs::integers::<usize>().min_value(1).max_value(400));
+    let delta = tc.draw(gs::integers::<i32>().min_value(-20).max_value(20)) as isize;
+    for s in line_spans(&text, budget) {
+        let got = resize_span(&text, &s, delta);
+        assert!(got.end <= text.len(), "never past the end of the source");
+        assert!(got.start <= got.end, "never inverted");
+        assert_eq!(&text[got.start..got.end], got.text, "must slice exactly");
+        assert_eq!(got.fingerprint, fingerprint_of(&got.text));
+        if delta > 0 {
+            assert!(
+                got.start <= s.start && got.end >= s.end,
+                "expansion is a superset"
+            );
+        }
+        if delta < 0 && !s.text.trim().is_empty() {
+            assert!(
+                !got.text.trim().is_empty(),
+                "contraction keeps at least one line"
+            );
+        }
+    }
 }

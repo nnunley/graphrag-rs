@@ -117,6 +117,13 @@ enum Commands {
         /// (rust|python|javascript|typescript|go|c|cpp).
         #[arg(long)]
         lang: Option<String>,
+        /// Split on line boundaries, never mid-line. Implied for code whose
+        /// extension has no parser.
+        #[arg(long)]
+        lines: bool,
+        /// Widen (or narrow, if negative) each chunk by N lines of context.
+        #[arg(long, allow_hyphen_values = true, default_value_t = 0)]
+        expand: isize,
     },
     /// Compute embeddings for entities that lack them
     Embed {
@@ -786,6 +793,8 @@ struct ChunkOpts<'a> {
     format: &'a str,
     code: bool,
     lang: Option<&'a str>,
+    lines: bool,
+    expand: isize,
 }
 
 fn cmd_chunk(path: &PathBuf, o: ChunkOpts<'_>) -> Result<(), String> {
@@ -797,6 +806,8 @@ fn cmd_chunk(path: &PathBuf, o: ChunkOpts<'_>) -> Result<(), String> {
         format,
         code,
         lang,
+        lines,
+        expand,
     } = o;
     let text =
         std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
@@ -808,10 +819,22 @@ fn cmd_chunk(path: &PathBuf, o: ChunkOpts<'_>) -> Result<(), String> {
             Some("md") | Some("markdown")
         )
     });
-    // --lang implies --code; --code alone infers the parser from the extension.
-    let all = if code || lang.is_some() {
+    // --lines forces line splitting; --lang implies --code; --code alone infers
+    // the parser from the extension and degrades to lines when there is none.
+    let all = if lines {
+        graphrag_core::line_spans(&text, size)
+    } else if code || lang.is_some() {
         match lang {
-            None => graphrag_core::code_spans_auto(&text, &path.to_string_lossy(), size)?,
+            None => {
+                let got = graphrag_core::code_spans_auto(&text, &path.to_string_lossy(), size)?;
+                if got.strategy == graphrag_core::ChunkStrategy::Lines {
+                    eprintln!(
+                        "note: no parser for {}; split on line boundaries",
+                        path.display()
+                    );
+                }
+                got.spans
+            }
             Some(name) => {
                 let language = graphrag_core::CodeLanguage::from_extension(name)
                     .or(match name {
@@ -843,12 +866,22 @@ fn cmd_chunk(path: &PathBuf, o: ChunkOpts<'_>) -> Result<(), String> {
         graphrag_core::chunk_spans(&text, &cfg)
     };
 
-    let spans = match nth {
+    let selected = match nth {
         Some(n) => match all.into_iter().nth(n) {
             Some(s) => vec![s],
             None => return Err(format!("chunk {n} does not exist in {}", path.display())),
         },
         None => all,
+    };
+
+    // Let the reader revise the ingest-time guess about how much context it needs.
+    let spans: Vec<_> = if expand == 0 {
+        selected
+    } else {
+        selected
+            .iter()
+            .map(|s| graphrag_core::resize_span(&text, s, expand))
+            .collect()
     };
 
     let mut out = std::io::stdout().lock();
@@ -1010,6 +1043,8 @@ fn main() -> ExitCode {
             format,
             code,
             lang,
+            lines,
+            expand,
         } => cmd_chunk(
             &path,
             ChunkOpts {
@@ -1020,6 +1055,8 @@ fn main() -> ExitCode {
                 format: &format,
                 code,
                 lang: lang.as_deref(),
+                lines,
+                expand,
             },
         ),
         Commands::Embed { store, limit } => {
