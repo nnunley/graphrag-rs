@@ -6,6 +6,19 @@ members = [
     "graphrag-nushell",
     "graphrag-mcp",
     "graphrag-cli",
+    "graphrag-py",
+]
+
+# Optional bindings are excluded from default builds: the Python extension
+# needs maturin (its symbols resolve at load time) and the nushell plugin is
+# only useful inside nushell. Build them explicitly:
+#   maturin build -m graphrag-py/Cargo.toml    # python
+#   cargo build -p nu_plugin_graphrag          # nushell
+default-members = [
+    "graphrag-core",
+    "graphrag-llm",
+    "graphrag-mcp",
+    "graphrag-cli",
 ]
 
 [workspace.package]
