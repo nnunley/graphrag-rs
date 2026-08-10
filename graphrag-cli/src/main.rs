@@ -90,6 +90,24 @@ enum Commands {
         /// Store name to export
         store: String,
     },
+    /// Compute embeddings for entities that lack them
+    Embed {
+        /// Store name
+        #[arg(long)]
+        store: Option<String>,
+        /// Maximum entities to embed in this pass
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+    /// Report pipeline phase status: what exists, what is ready, what changed
+    Status {
+        /// Store name
+        #[arg(long)]
+        store: Option<String>,
+        /// Emit JSON instead of a human summary
+        #[arg(long)]
+        json: bool,
+    },
     /// Emit pending map-reduce work units as JSON Lines on stdout
     Plan {
         /// Stage to plan: extract | summarize
@@ -722,6 +740,65 @@ fn cmd_apply(stage: &str, store: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Print the pipeline phase table: which phases exist, what is ready, and
+/// what changed underneath a previous run.
+/// Embed entities that have no vector yet. Local compute, so the executor is
+/// this process; the plan/apply split still bounds and checkpoints the work.
+fn cmd_embed(store: &str, limit: Option<usize>) -> Result<(), String> {
+    let db = open_db()?;
+    let units =
+        graphrag_core::mr::plan_embed(&db, store, limit).map_err(|e| format!("plan embed: {e}"))?;
+    if units.is_empty() {
+        eprintln!("all entities embedded");
+        return Ok(());
+    }
+    let embedder = open_embedder()?;
+    let total = units.len();
+    let mut results = Vec::with_capacity(total);
+    for (i, u) in units.iter().enumerate() {
+        let vector = embedder.embed(&u.text).map_err(|e| e.to_string())?;
+        results.push(graphrag_core::mr::EmbedResult {
+            entity_id: u.entity_id,
+            vector,
+        });
+        if (i + 1) % 200 == 0 || i + 1 == total {
+            eprintln!("embedded {}/{total}", i + 1);
+        }
+    }
+    let n = graphrag_core::mr::apply_embed(&db, store, &results)
+        .map_err(|e| format!("apply embed: {e}"))?;
+    eprintln!("stored {n} entity embedding(s)");
+    Ok(())
+}
+
+fn cmd_status(store: &str, json: bool) -> Result<(), String> {
+    let db = open_db()?;
+    let st = graphrag_core::mr::pipeline_status(&db, store).map_err(|e| format!("status: {e}"))?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&st).map_err(|e| format!("serialize: {e}"))?
+        );
+        return Ok(());
+    }
+    println!("store: {}", st.store);
+    println!(
+        "{:<12} {:>7} {:>7} {:>8} {:>8}  GUIDANCE",
+        "PHASE", "TOTAL", "DONE", "PENDING", "BLOCKED"
+    );
+    for p in &st.phases {
+        println!(
+            "{:<12} {:>7} {:>7} {:>8} {:>8}  {}",
+            p.phase, p.total, p.done, p.pending, p.blocked, p.guidance
+        );
+        for (level, count, done) in &p.levels {
+            println!("             level {level}: {done}/{count} summarized");
+        }
+    }
+    println!("\nnext: {}", st.next);
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
@@ -759,6 +836,12 @@ fn main() -> ExitCode {
             cmd_ask(&query, top, store.as_deref().unwrap_or(DEFAULT_STORE))
         }
         Commands::Export { store } => cmd_export(&store),
+        Commands::Embed { store, limit } => {
+            cmd_embed(store.as_deref().unwrap_or(DEFAULT_STORE), limit)
+        }
+        Commands::Status { store, json } => {
+            cmd_status(store.as_deref().unwrap_or(DEFAULT_STORE), json)
+        }
         Commands::Plan {
             stage,
             store,
