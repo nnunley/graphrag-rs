@@ -90,6 +90,26 @@ enum Commands {
         /// Store name to export
         store: String,
     },
+    /// Split a file into chunks: spans for tooling, or text for review
+    Chunk {
+        /// File to chunk
+        path: PathBuf,
+        /// Target chunk size in characters
+        #[arg(long, default_value_t = 2000)]
+        size: usize,
+        /// Overlap in characters (0 disables)
+        #[arg(long, default_value_t = 200)]
+        overlap: usize,
+        /// Force markdown-aware splitting on/off (default: infer from extension)
+        #[arg(long)]
+        markdown: Option<bool>,
+        /// Emit only the n-th chunk (0-based)
+        #[arg(long)]
+        nth: Option<usize>,
+        /// Output form: spans | text | review | json
+        #[arg(long, default_value = "spans")]
+        format: String,
+    },
     /// Compute embeddings for entities that lack them
     Embed {
         /// Store name
@@ -744,6 +764,101 @@ fn cmd_apply(stage: &str, store: &str) -> Result<(), String> {
 /// what changed underneath a previous run.
 /// Embed entities that have no vector yet. Local compute, so the executor is
 /// this process; the plan/apply split still bounds and checkpoints the work.
+/// Chunk a file. Two audiences, selected by --format:
+///   spans  - TSV of index/start/end/lines, for sed and other byte tooling
+///   text   - the chunk bodies, NUL-free and newline separated by index
+///   review - a human-readable table with previews
+///   json   - machine-readable spans including the chunk text
+fn cmd_chunk(
+    path: &PathBuf,
+    size: usize,
+    overlap: usize,
+    markdown: Option<bool>,
+    nth: Option<usize>,
+    format: &str,
+) -> Result<(), String> {
+    let text =
+        std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    // Infer the style from the extension unless overridden: markdown files get
+    // header/code-block awareness, everything else paragraph/sentence splitting.
+    let md = markdown.unwrap_or_else(|| {
+        matches!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("md") | Some("markdown")
+        )
+    });
+    let mut cfg = graphrag_core::ChunkerConfig::new(size).with_markdown(md);
+    cfg = if overlap == 0 {
+        cfg.without_overlap()
+    } else {
+        cfg.with_overlap(overlap)
+    };
+
+    let spans = match nth {
+        Some(n) => match graphrag_core::nth_chunk(&text, n, &cfg) {
+            Some(s) => vec![s],
+            None => return Err(format!("chunk {n} does not exist in {}", path.display())),
+        },
+        None => graphrag_core::chunk_spans(&text, &cfg),
+    };
+
+    let mut out = std::io::stdout().lock();
+    match format {
+        "spans" => {
+            writeln!(
+                out,
+                "index\tstart\tend\tline_start\tline_end\tbytes\tsed_range"
+            )
+            .map_err(|e| e.to_string())?;
+            for s in &spans {
+                writeln!(
+                    out,
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                    s.index,
+                    s.start,
+                    s.end,
+                    s.line_start,
+                    s.line_end,
+                    s.len(),
+                    s.sed_range()
+                )
+                .map_err(|e| e.to_string())?;
+            }
+        }
+        "text" => {
+            for s in &spans {
+                writeln!(out, "{}", s.text).map_err(|e| e.to_string())?;
+            }
+        }
+        "review" => {
+            write!(out, "{}", graphrag_core::review_spans(&spans, 100))
+                .map_err(|e| e.to_string())?;
+            eprintln!(
+                "{} chunk(s), {} style",
+                spans.len(),
+                if md { "markdown" } else { "plain" }
+            );
+        }
+        "json" => {
+            for s in &spans {
+                let v = serde_json::json!({
+                    "record": "chunk_span", "index": s.index,
+                    "start": s.start, "end": s.end,
+                    "line_start": s.line_start, "line_end": s.line_end,
+                    "bytes": s.len(), "text": s.text,
+                });
+                writeln!(out, "{v}").map_err(|e| e.to_string())?;
+            }
+        }
+        other => {
+            return Err(format!(
+                "unknown --format {other:?} (spans|text|review|json)"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn cmd_embed(store: &str, limit: Option<usize>) -> Result<(), String> {
     let db = open_db()?;
     let units =
@@ -836,6 +951,14 @@ fn main() -> ExitCode {
             cmd_ask(&query, top, store.as_deref().unwrap_or(DEFAULT_STORE))
         }
         Commands::Export { store } => cmd_export(&store),
+        Commands::Chunk {
+            path,
+            size,
+            overlap,
+            markdown,
+            nth,
+            format,
+        } => cmd_chunk(&path, size, overlap, markdown, nth, &format),
         Commands::Embed { store, limit } => {
             cmd_embed(store.as_deref().unwrap_or(DEFAULT_STORE), limit)
         }
