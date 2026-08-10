@@ -498,3 +498,267 @@ More content.
         }
     }
 }
+
+/// Chunk on line boundaries, never splitting a line.
+///
+/// The fallback for source whose language has no tree-sitter parser. Splitting
+/// code mid-line is worse than splitting prose mid-sentence — a severed line is
+/// often not even lexically valid — so lines are packed up to `max_bytes` and a
+/// line that alone exceeds the budget is emitted whole rather than cut. Chunking
+/// is lossless: concatenating the spans reproduces the source exactly.
+pub fn line_spans(text: &str, max_bytes: usize) -> Vec<ChunkSpan> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    let budget = max_bytes.max(1);
+    let mut cuts: Vec<(usize, usize)> = Vec::new();
+    let mut start = 0usize;
+    let mut cur = 0usize;
+
+    // Iterate line-by-line, keeping each line's terminator attached to it.
+    for line in text.split_inclusive('\n') {
+        let len = line.len();
+        // Flush when adding this line would overflow a non-empty chunk.
+        if cur > 0 && cur + len > budget {
+            cuts.push((start, start + cur));
+            start += cur;
+            cur = 0;
+        }
+        cur += len;
+    }
+    if cur > 0 {
+        cuts.push((start, start + cur));
+    }
+
+    cuts.into_iter()
+        .enumerate()
+        .map(|(index, (s, e))| span_at(text, index, s, e))
+        .collect()
+}
+
+/// Widen (`delta > 0`) or narrow (`delta < 0`) a span by whole lines.
+///
+/// Chunk size is a guess made at ingest time about how much context a reader
+/// needs. This lets the reader revise that guess: a model that finds a chunk
+/// truncated mid-thought can ask for more, and one drowning in irrelevance can
+/// ask for less, without re-chunking the file. Offsets make this cheap — widen
+/// the range and re-slice. Bounds are clamped to the source and a span is never
+/// inverted, so any `delta` is safe.
+pub fn resize_span(text: &str, span: &ChunkSpan, delta_lines: isize) -> ChunkSpan {
+    let (mut start, mut end) = (span.start.min(text.len()), span.end.min(text.len()));
+
+    if delta_lines > 0 {
+        for _ in 0..delta_lines {
+            start = text[..start]
+                .trim_end_matches('\n')
+                .rfind('\n')
+                .map_or(0, |p| p + 1);
+            end = match text[end..].find('\n') {
+                Some(p) => (end + p + 1).min(text.len()),
+                None => text.len(),
+            };
+        }
+    } else if delta_lines < 0 {
+        for _ in 0..(-delta_lines) {
+            // Contraction has a floor: a span that held content keeps at least one
+            // line. Shrinking to nothing would answer "less context" with "no
+            // context", which is never what a caller asking to narrow means.
+            let inner = text[start..end].trim_end_matches('\n');
+            if !inner.contains('\n') {
+                break;
+            }
+            // drop the first line
+            let next = match text[start..end].find('\n') {
+                Some(p) => start + p + 1,
+                None => end,
+            };
+            // drop the last line, but never past the new start
+            let body = text[next..end].trim_end_matches('\n');
+            let prev = body.rfind('\n').map_or(end, |p| next + p + 1);
+            start = next;
+            end = prev.max(next);
+        }
+    }
+    span_at(text, span.index, start, end)
+}
+
+/// Build a span for `text[start..end]`, deriving lines and fingerprint.
+fn span_at(text: &str, index: usize, start: usize, end: usize) -> ChunkSpan {
+    let (start, end) = (start.min(text.len()), end.min(text.len()));
+    let end = end.max(start);
+    let body = &text[start..end];
+    let line_start = text[..start].matches('\n').count() + 1;
+    let line_end = line_start + body.trim_end_matches('\n').matches('\n').count();
+    ChunkSpan {
+        index,
+        start,
+        end,
+        line_start,
+        line_end,
+        text: body.to_string(),
+        fingerprint: fingerprint_of(body),
+    }
+}
+
+#[cfg(test)]
+mod line_and_resize_tests {
+    use super::*;
+
+    const SRC: &str = "alpha one\nbeta two\ngamma three\ndelta four\nepsilon five\n";
+
+    #[test]
+    fn line_spans_never_split_a_line() {
+        let spans = line_spans(SRC, 24);
+        assert!(spans.len() > 1, "should split into several chunks");
+        for s in &spans {
+            assert!(
+                s.text.ends_with('\n') || s.end == SRC.len(),
+                "chunk {} ended mid-line: {:?}",
+                s.index,
+                s.text
+            );
+            assert_eq!(&SRC[s.start..s.end], s.text);
+        }
+        // every byte accounted for, in order, no gaps
+        let joined: String = spans.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(joined, SRC, "line chunking must be lossless");
+    }
+
+    #[test]
+    fn a_line_longer_than_the_budget_becomes_its_own_chunk() {
+        let long = format!("short\n{}\nshort\n", "x".repeat(500));
+        let spans = line_spans(&long, 50);
+        let big = spans
+            .iter()
+            .find(|s| s.text.contains("xxx"))
+            .expect("long line present");
+        assert!(
+            big.len() > 50,
+            "an over-budget line is kept whole rather than cut"
+        );
+        assert_eq!(big.line_start, big.line_end, "and stays a single line");
+    }
+
+    #[test]
+    fn resize_expands_by_whole_lines_and_still_slices_exactly() {
+        let spans = line_spans(SRC, 20);
+        let mid = spans
+            .iter()
+            .find(|s| s.line_start > 1)
+            .expect("a non-first chunk");
+        let wider = resize_span(SRC, mid, 1);
+        assert!(wider.line_start < mid.line_start, "expanded upward");
+        assert!(wider.len() > mid.len(), "expanded span is larger");
+        assert_eq!(
+            &SRC[wider.start..wider.end],
+            wider.text,
+            "must still slice exactly"
+        );
+        assert_eq!(
+            wider.fingerprint,
+            fingerprint_of(&wider.text),
+            "fingerprint follows the body"
+        );
+    }
+
+    #[test]
+    fn resize_contracts_and_clamps_without_panicking() {
+        let spans = line_spans(SRC, 60);
+        let whole = &spans[0];
+        let smaller = resize_span(SRC, whole, -1);
+        assert!(smaller.len() <= whole.len(), "contracted span is no larger");
+        assert_eq!(&SRC[smaller.start..smaller.end], smaller.text);
+        // clamping: absurd expansion yields the whole source, not an out-of-range panic
+        let huge = resize_span(SRC, whole, 9_999);
+        assert_eq!(huge.start, 0);
+        assert_eq!(huge.end, SRC.len());
+        // absurd contraction must not invert the range
+        let gone = resize_span(SRC, whole, -9_999);
+        assert!(
+            gone.start <= gone.end,
+            "contraction must never invert a span"
+        );
+        // ...and must not annihilate content: a chunk that had text still has text
+        assert!(
+            !gone.text.trim().is_empty(),
+            "contraction must leave at least one line, got {:?}",
+            gone.text
+        );
+    }
+
+    #[test]
+    fn contracting_never_empties_a_span_that_had_content() {
+        let spans = line_spans(SRC, 24);
+        for s in &spans {
+            for d in 1..=4 {
+                let smaller = resize_span(SRC, s, -d);
+                assert!(
+                    !smaller.text.trim().is_empty(),
+                    "chunk {} contracted by {d} became empty",
+                    s.index
+                );
+                assert_eq!(&SRC[smaller.start..smaller.end], smaller.text);
+            }
+        }
+    }
+
+    #[test]
+    fn resize_survives_a_stale_span_whose_offsets_exceed_the_source() {
+        // Exactly the staleness fingerprints exist to detect: a span recorded
+        // against a longer file, replayed against a shortened one.
+        let stale = ChunkSpan {
+            index: 0,
+            start: 9_000,
+            end: 9_500,
+            line_start: 400,
+            line_end: 410,
+            text: "gone".to_string(),
+            fingerprint: fingerprint_of("gone"),
+        };
+        for d in [-3isize, -1, 0, 1, 7] {
+            let got = resize_span(SRC, &stale, d);
+            assert!(
+                got.end <= SRC.len(),
+                "must clamp to the source, got {}",
+                got.end
+            );
+            assert!(got.start <= got.end, "must not invert");
+            assert_eq!(
+                &SRC[got.start..got.end],
+                got.text,
+                "must still slice exactly"
+            );
+        }
+    }
+
+    #[test]
+    fn an_oversized_line_does_not_drag_its_neighbours_along() {
+        let src = format!("a\n{}\nb\n", "y".repeat(300));
+        let spans = line_spans(&src, 40);
+        for s in &spans {
+            let body = s.text.trim_end_matches('\n');
+            // a chunk is either within budget, or is exactly one over-budget line
+            assert!(
+                s.len() <= 40 || !body.contains('\n'),
+                "over-budget chunk {} must be a single line, got {:?}",
+                s.index,
+                s.text
+            );
+        }
+        let joined: String = spans.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(joined, src, "still lossless");
+    }
+
+    #[test]
+    fn expanding_a_span_never_loses_the_original_text() {
+        let spans = line_spans(SRC, 20);
+        for s in &spans {
+            let w = resize_span(SRC, s, 2);
+            assert!(
+                w.start <= s.start && w.end >= s.end,
+                "expansion must be a superset of the original"
+            );
+            assert!(w.text.contains(s.text.trim()), "original content retained");
+        }
+    }
+}
