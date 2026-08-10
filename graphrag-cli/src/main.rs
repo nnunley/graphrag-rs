@@ -109,6 +109,14 @@ enum Commands {
         /// Output form: spans | text | review | json
         #[arg(long, default_value = "spans")]
         format: String,
+        /// Chunk as source code on AST boundaries, inferring the parser from
+        /// the file extension.
+        #[arg(long)]
+        code: bool,
+        /// Force a specific parser, implying --code
+        /// (rust|python|javascript|typescript|go|c|cpp).
+        #[arg(long)]
+        lang: Option<String>,
     },
     /// Compute embeddings for entities that lack them
     Embed {
@@ -769,14 +777,27 @@ fn cmd_apply(stage: &str, store: &str) -> Result<(), String> {
 ///   text   - the chunk bodies, NUL-free and newline separated by index
 ///   review - a human-readable table with previews
 ///   json   - machine-readable spans including the chunk text
-fn cmd_chunk(
-    path: &PathBuf,
+/// Options for [`cmd_chunk`], grouped so the signature stays readable.
+struct ChunkOpts<'a> {
     size: usize,
     overlap: usize,
     markdown: Option<bool>,
     nth: Option<usize>,
-    format: &str,
-) -> Result<(), String> {
+    format: &'a str,
+    code: bool,
+    lang: Option<&'a str>,
+}
+
+fn cmd_chunk(path: &PathBuf, o: ChunkOpts<'_>) -> Result<(), String> {
+    let ChunkOpts {
+        size,
+        overlap,
+        markdown,
+        nth,
+        format,
+        code,
+        lang,
+    } = o;
     let text =
         std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     // Infer the style from the extension unless overridden: markdown files get
@@ -787,19 +808,47 @@ fn cmd_chunk(
             Some("md") | Some("markdown")
         )
     });
-    let mut cfg = graphrag_core::ChunkerConfig::new(size).with_markdown(md);
-    cfg = if overlap == 0 {
-        cfg.without_overlap()
+    // --lang implies --code; --code alone infers the parser from the extension.
+    let all = if code || lang.is_some() {
+        match lang {
+            None => graphrag_core::code_spans_auto(&text, &path.to_string_lossy(), size)?,
+            Some(name) => {
+                let language = graphrag_core::CodeLanguage::from_extension(name)
+                    .or(match name {
+                        "rust" => Some(graphrag_core::CodeLanguage::Rust),
+                        "python" => Some(graphrag_core::CodeLanguage::Python),
+                        "javascript" => Some(graphrag_core::CodeLanguage::JavaScript),
+                        "typescript" => Some(graphrag_core::CodeLanguage::TypeScript),
+                        "go" => Some(graphrag_core::CodeLanguage::Go),
+                        "c" => Some(graphrag_core::CodeLanguage::C),
+                        "cpp" => Some(graphrag_core::CodeLanguage::Cpp),
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        format!(
+                            "unknown language {name:?}; supported extensions: {}",
+                            graphrag_core::supported_extensions().join(", ")
+                        )
+                    })?;
+                graphrag_core::code_spans(&text, language, size)?
+            }
+        }
     } else {
-        cfg.with_overlap(overlap)
+        let mut cfg = graphrag_core::ChunkerConfig::new(size).with_markdown(md);
+        cfg = if overlap == 0 {
+            cfg.without_overlap()
+        } else {
+            cfg.with_overlap(overlap)
+        };
+        graphrag_core::chunk_spans(&text, &cfg)
     };
 
     let spans = match nth {
-        Some(n) => match graphrag_core::nth_chunk(&text, n, &cfg) {
+        Some(n) => match all.into_iter().nth(n) {
             Some(s) => vec![s],
             None => return Err(format!("chunk {n} does not exist in {}", path.display())),
         },
-        None => graphrag_core::chunk_spans(&text, &cfg),
+        None => all,
     };
 
     let mut out = std::io::stdout().lock();
@@ -807,19 +856,20 @@ fn cmd_chunk(
         "spans" => {
             writeln!(
                 out,
-                "index\tstart\tend\tline_start\tline_end\tbytes\tsed_range"
+                "index\tstart\tend\tline_start\tline_end\tbytes\tfingerprint\tsed_range"
             )
             .map_err(|e| e.to_string())?;
             for s in &spans {
                 writeln!(
                     out,
-                    "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                     s.index,
                     s.start,
                     s.end,
                     s.line_start,
                     s.line_end,
                     s.len(),
+                    s.fingerprint,
                     s.sed_range()
                 )
                 .map_err(|e| e.to_string())?;
@@ -845,7 +895,7 @@ fn cmd_chunk(
                     "record": "chunk_span", "index": s.index,
                     "start": s.start, "end": s.end,
                     "line_start": s.line_start, "line_end": s.line_end,
-                    "bytes": s.len(), "text": s.text,
+                    "bytes": s.len(), "fingerprint": s.fingerprint, "text": s.text,
                 });
                 writeln!(out, "{v}").map_err(|e| e.to_string())?;
             }
@@ -958,7 +1008,20 @@ fn main() -> ExitCode {
             markdown,
             nth,
             format,
-        } => cmd_chunk(&path, size, overlap, markdown, nth, &format),
+            code,
+            lang,
+        } => cmd_chunk(
+            &path,
+            ChunkOpts {
+                size,
+                overlap,
+                markdown,
+                nth,
+                format: &format,
+                code,
+                lang: lang.as_deref(),
+            },
+        ),
         Commands::Embed { store, limit } => {
             cmd_embed(store.as_deref().unwrap_or(DEFAULT_STORE), limit)
         }

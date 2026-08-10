@@ -74,6 +74,43 @@ pub struct ChunkSpan {
     pub line_end: usize,
     /// The chunk itself; always equal to `source[start..end]`.
     pub text: String,
+    /// `sha256:` + 64 lowercase hex over the chunk text.
+    ///
+    /// Offsets locate a chunk; the fingerprint identifies it. A stored
+    /// reference ("chunk 12 of this file") is positional and silently returns
+    /// different content once the file is edited — carrying the fingerprint
+    /// makes that detectable instead.
+    pub fingerprint: String,
+}
+
+/// Fingerprint chunk content with xxh3-64.
+///
+/// Chunk identity is scoped to one file, where 64 bits is ample and the 16-hex
+/// rendering stays readable in a TSV row or a stored reference. Use
+/// [`fingerprint_wide`] when identity must hold across a whole corpus.
+pub fn fingerprint_of(text: &str) -> String {
+    format!("xxh3:{:016x}", xxhash_rust::xxh3::xxh3_64(text.as_bytes()))
+}
+
+/// Fingerprint with xxh3-128, for identity across a corpus rather than a file.
+pub fn fingerprint_wide(text: &str) -> String {
+    format!(
+        "xxh3-128:{:032x}",
+        xxhash_rust::xxh3::xxh3_128(text.as_bytes())
+    )
+}
+
+/// Why a verified chunk lookup failed.
+#[derive(Debug, thiserror::Error)]
+pub enum ChunkError {
+    #[error("chunk {index} does not exist (source yields {available})")]
+    OutOfRange { index: usize, available: usize },
+    #[error("chunk {index} no longer matches: expected {expected}, found {found}")]
+    FingerprintMismatch {
+        index: usize,
+        expected: String,
+        found: String,
+    },
 }
 
 impl ChunkSpan {
@@ -120,7 +157,12 @@ pub fn chunk_spans(text: &str, config: &ChunkerConfig) -> Vec<ChunkSpan> {
         TextSplitter::new(cfg).chunk_indices(text).collect()
     };
 
-    // Prefix line counts, so line numbers cost one pass rather than one per chunk.
+    spans_from_indices(text, indexed)
+}
+
+/// Build spans from `(offset, chunk)` pairs. Shared by the text and code
+/// chunkers so both produce identical span semantics.
+pub(crate) fn spans_from_indices(text: &str, indexed: Vec<(usize, &str)>) -> Vec<ChunkSpan> {
     let mut newline_before: Vec<usize> = Vec::with_capacity(text.len() + 1);
     let mut seen = 0usize;
     for b in text.bytes() {
@@ -143,6 +185,7 @@ pub fn chunk_spans(text: &str, config: &ChunkerConfig) -> Vec<ChunkSpan> {
                 end,
                 line_start: line_at(start),
                 line_end: line_at(end.saturating_sub(1)),
+                fingerprint: fingerprint_of(chunk),
                 text: chunk.to_string(),
             }
         })
@@ -158,19 +201,46 @@ pub fn nth_chunk(text: &str, n: usize, config: &ChunkerConfig) -> Option<ChunkSp
     chunk_spans(text, config).into_iter().nth(n)
 }
 
+/// Fetch the `n`-th chunk and verify it still holds the expected content.
+///
+/// This is what makes a stored chunk reference safe across time: the index
+/// locates it, the fingerprint proves the file has not shifted underneath.
+pub fn nth_chunk_verified(
+    text: &str,
+    n: usize,
+    config: &ChunkerConfig,
+    expected_fingerprint: &str,
+) -> Result<ChunkSpan, ChunkError> {
+    let spans = chunk_spans(text, config);
+    let available = spans.len();
+    let span = spans.into_iter().nth(n).ok_or(ChunkError::OutOfRange {
+        index: n,
+        available,
+    })?;
+    if span.fingerprint != expected_fingerprint {
+        return Err(ChunkError::FingerprintMismatch {
+            index: n,
+            expected: expected_fingerprint.to_string(),
+            found: span.fingerprint,
+        });
+    }
+    Ok(span)
+}
+
 /// Render spans for human review: index, line range, size, and a preview.
 pub fn review_spans(spans: &[ChunkSpan], preview: usize) -> String {
     let mut out = String::new();
     for s in spans {
         let head: String = s.text.chars().take(preview).collect();
         out.push_str(&format!(
-            "[{:>3}] lines {:>5}-{:<5} bytes {:>7}-{:<7} ({} B)\n      {}\n",
+            "[{:>3}] lines {:>5}-{:<5} bytes {:>7}-{:<7} ({} B) {}\n      {}\n",
             s.index,
             s.line_start,
             s.line_end,
             s.start,
             s.end,
             s.len(),
+            s.fingerprint,
             head.replace('\n', " ⏎ ")
         ));
     }
@@ -218,6 +288,99 @@ pub fn chunk_plain(text: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    // --- fingerprints: make a chunk reference verifiable ----------------------
+
+    #[test]
+    fn span_fingerprint_has_the_canonical_shape() {
+        // xxh3-64: short enough to read and paste, ample for chunk identity
+        // within a file. sha256 would be 64 hex chars for no added benefit here.
+        let spans = chunk_spans("some text to split into a chunk", &ChunkerConfig::new(100));
+        let fp = &spans[0].fingerprint;
+        assert!(fp.starts_with("xxh3:"), "got {fp}");
+        let hex = fp.strip_prefix("xxh3:").unwrap();
+        assert_eq!(hex.len(), 16, "xxh3-64 renders as 16 hex chars");
+        assert!(
+            hex.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            "lowercase hex only: {hex}"
+        );
+    }
+
+    #[test]
+    fn wide_fingerprint_is_available_for_cross_corpus_identity() {
+        let fp = fingerprint_wide("some text");
+        assert!(fp.starts_with("xxh3-128:"), "got {fp}");
+        assert_eq!(fp.strip_prefix("xxh3-128:").unwrap().len(), 32);
+        assert_eq!(fingerprint_wide("some text"), fp, "deterministic");
+        assert_ne!(fingerprint_wide("some other text"), fp);
+    }
+
+    #[test]
+    fn fingerprint_is_deterministic_and_content_addressed() {
+        let cfg = ChunkerConfig::new(40);
+        let a = chunk_spans("alpha beta gamma delta epsilon zeta", &cfg);
+        let b = chunk_spans("alpha beta gamma delta epsilon zeta", &cfg);
+        assert_eq!(
+            a[0].fingerprint, b[0].fingerprint,
+            "same content, same fingerprint"
+        );
+        let c = chunk_spans("alpha beta gamma delta epsilon ZETA", &cfg);
+        assert_ne!(
+            a[0].fingerprint, c[0].fingerprint,
+            "changed content must change it"
+        );
+    }
+
+    #[test]
+    fn fingerprint_covers_the_chunk_not_its_position() {
+        // The same chunk text appearing at a different offset keeps its fingerprint:
+        // it identifies content, so a reference survives edits elsewhere in the file.
+        let cfg = ChunkerConfig::new(30).without_overlap();
+        let one = chunk_spans("PREFIX.\n\nstable body text here.", &cfg);
+        let two = chunk_spans("A MUCH LONGER PREFIX.\n\nstable body text here.", &cfg);
+        let a = one.iter().find(|s| s.text.contains("stable body")).unwrap();
+        let b = two.iter().find(|s| s.text.contains("stable body")).unwrap();
+        assert_ne!(a.start, b.start, "offsets differ");
+        assert_eq!(
+            a.fingerprint, b.fingerprint,
+            "fingerprint tracks content, not position"
+        );
+    }
+
+    #[test]
+    fn nth_chunk_verified_accepts_a_matching_fingerprint() {
+        let text = "First part here.\n\nSecond part follows on.\n\nThird part ends.";
+        let cfg = ChunkerConfig::new(25);
+        let want = nth_chunk(text, 1, &cfg).unwrap();
+        let got =
+            nth_chunk_verified(text, 1, &cfg, &want.fingerprint).expect("fingerprint matches");
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn nth_chunk_verified_detects_a_changed_file() {
+        let cfg = ChunkerConfig::new(25);
+        let before = "First part here.\n\nSecond part follows on.\n\nThird part ends.";
+        let reference = nth_chunk(before, 1, &cfg).unwrap().fingerprint;
+        // the file is edited; chunk 1 no longer holds what the reference recorded
+        let after = "First part here.\n\nSecond part REWRITTEN entirely.\n\nThird part ends.";
+        let err = nth_chunk_verified(after, 1, &cfg, &reference).unwrap_err();
+        assert!(
+            matches!(err, ChunkError::FingerprintMismatch { .. }),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn nth_chunk_verified_reports_a_missing_chunk() {
+        let cfg = ChunkerConfig::new(1000);
+        let err = nth_chunk_verified("short", 5, &cfg, "xxh3:00").unwrap_err();
+        assert!(
+            matches!(err, ChunkError::OutOfRange { index: 5, .. }),
+            "{err:?}"
+        );
+    }
+
     // --- span form: offsets for tooling, text for humans ----------------------
 
     #[test]
