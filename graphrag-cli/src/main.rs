@@ -6,6 +6,10 @@ use graphrag_core::{
 };
 use graphrag_llm::{ChatClient, EntityTriple, OllamaChatClient, strategy_for_model};
 use std::collections::HashMap;
+mod llm_strategy;
+
+use std::io::{BufRead, Write};
+
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -85,6 +89,28 @@ enum Commands {
     Export {
         /// Store name to export
         store: String,
+    },
+    /// Emit pending map-reduce work units as JSON Lines on stdout
+    Plan {
+        /// Stage to plan: extract | summarize
+        stage: String,
+        /// Store name
+        #[arg(long)]
+        store: Option<String>,
+        /// Model the units are intended for (selects prompting strategy)
+        #[arg(long)]
+        model: String,
+        /// Maximum number of units to emit
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+    /// Ingest executor results as JSON Lines from stdin
+    Apply {
+        /// Stage to apply: extract | summarize
+        stage: String,
+        /// Store name
+        #[arg(long)]
+        store: Option<String>,
     },
 }
 
@@ -618,6 +644,84 @@ fn cmd_export(store: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Emit pending work units as JSON Lines. `plan` is a pure read: it never
+/// calls a model, so it is safe to run repeatedly and cheap to diff.
+fn cmd_plan(stage: &str, store: &str, model: &str, limit: Option<usize>) -> Result<(), String> {
+    let db = open_db()?;
+    let units = match stage {
+        "extract" => {
+            let strategy = llm_strategy::LlmStrategy::for_model(model);
+            graphrag_core::mr::plan_extract(&db, store, model, &strategy, limit)
+        }
+        // Summarization needs no strategy: the reply IS the summary.
+        "summarize" => graphrag_core::mr::plan_summarize(&db, store, model, limit),
+        other => {
+            return Err(format!(
+                "unknown plan stage {other:?} (supported: extract, summarize)"
+            ));
+        }
+    }
+    .map_err(|e| format!("plan {stage}: {e}"))?;
+    let mut out = std::io::stdout().lock();
+    for u in &units {
+        let line = serde_json::to_string(u).map_err(|e| format!("serialize unit: {e}"))?;
+        writeln!(out, "{line}").map_err(|e| format!("write unit: {e}"))?;
+    }
+    eprintln!("planned {} {stage} unit(s)", units.len());
+    Ok(())
+}
+
+/// Ingest executor results from stdin. Results may arrive partially and out of
+/// order; each is independent, so a crashed run simply leaves the rest pending.
+fn cmd_apply(stage: &str, store: &str) -> Result<(), String> {
+    let db = open_db()?;
+    let mut raw: Vec<String> = Vec::new();
+    for line in std::io::stdin().lock().lines() {
+        let line = line.map_err(|e| format!("read stdin: {e}"))?;
+        if !line.trim().is_empty() {
+            raw.push(line);
+        }
+    }
+    match stage {
+        "extract" => {
+            let results: Vec<graphrag_core::mr::ExtractResult> = raw
+                .iter()
+                .enumerate()
+                .map(|(n, l)| {
+                    serde_json::from_str(l).map_err(|e| format!("parse result line {}: {e}", n + 1))
+                })
+                .collect::<Result<_, _>>()?;
+            // Results share a model in practice; resolve the strategy per batch.
+            let model = results.first().map(|r| r.model.clone()).unwrap_or_default();
+            let strategy = llm_strategy::LlmStrategy::for_model(&model);
+            let persisted = graphrag_core::mr::apply_extract(&db, store, &strategy, &results)
+                .map_err(|e| format!("apply {stage}: {e}"))?;
+            eprintln!(
+                "applied {} result(s), persisted {persisted} triple(s)",
+                results.len()
+            );
+        }
+        "summarize" => {
+            let results: Vec<graphrag_core::mr::SummaryResult> = raw
+                .iter()
+                .enumerate()
+                .map(|(n, l)| {
+                    serde_json::from_str(l).map_err(|e| format!("parse result line {}: {e}", n + 1))
+                })
+                .collect::<Result<_, _>>()?;
+            let n = graphrag_core::mr::apply_summarize(&db, store, &results)
+                .map_err(|e| format!("apply {stage}: {e}"))?;
+            eprintln!("applied {n} summary result(s)");
+        }
+        other => {
+            return Err(format!(
+                "unknown apply stage {other:?} (supported: extract, summarize)"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
@@ -655,6 +759,20 @@ fn main() -> ExitCode {
             cmd_ask(&query, top, store.as_deref().unwrap_or(DEFAULT_STORE))
         }
         Commands::Export { store } => cmd_export(&store),
+        Commands::Plan {
+            stage,
+            store,
+            model,
+            limit,
+        } => cmd_plan(
+            &stage,
+            store.as_deref().unwrap_or(DEFAULT_STORE),
+            &model,
+            limit,
+        ),
+        Commands::Apply { stage, store } => {
+            cmd_apply(&stage, store.as_deref().unwrap_or(DEFAULT_STORE))
+        }
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
