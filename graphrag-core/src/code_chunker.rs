@@ -86,6 +86,53 @@ impl CodeChunkerConfig {
     }
 }
 
+/// Chunk code on AST boundaries, reporting where each chunk came from.
+///
+/// Same span contract as [`crate::chunker::chunk_spans`]: byte offsets that
+/// slice the source exactly, 1-based line numbers, and an xxh3 fingerprint —
+/// so a code chunk can be handed to `sed`, cited in review, or referenced and
+/// re-fetched later with its content verified.
+pub fn code_spans(
+    code: &str,
+    language: CodeLanguage,
+    chunk_size: usize,
+) -> Result<Vec<crate::chunker::ChunkSpan>, String> {
+    if code.is_empty() {
+        return Ok(vec![]);
+    }
+    let config = CodeChunkerConfig::new(language).with_chunk_size(chunk_size);
+    let splitter = config.language.create_splitter(config.chunk_size)?;
+    let indexed: Vec<(usize, &str)> = splitter.chunk_indices(code).collect();
+    Ok(crate::chunker::spans_from_indices(code, indexed))
+}
+
+/// Chunk code, choosing the parser from the file's extension.
+///
+/// The language hint is the path itself, which is what callers naturally have.
+pub fn code_spans_auto(
+    code: &str,
+    file_path: &str,
+    chunk_size: usize,
+) -> Result<Vec<crate::chunker::ChunkSpan>, String> {
+    let extension = file_path
+        .rsplit('.')
+        .next()
+        .ok_or_else(|| "No file extension found".to_string())?;
+    let language = CodeLanguage::from_extension(extension)
+        .ok_or_else(|| format!("Unsupported file extension: {extension}"))?;
+    code_spans(code, language, chunk_size)
+}
+
+/// The `n`-th code chunk, or `None` when the source yields fewer.
+pub fn nth_code_chunk(
+    code: &str,
+    language: CodeLanguage,
+    chunk_size: usize,
+    n: usize,
+) -> Result<Option<crate::chunker::ChunkSpan>, String> {
+    Ok(code_spans(code, language, chunk_size)?.into_iter().nth(n))
+}
+
 /// Chunk source code into AST-aware segments
 ///
 /// Uses tree-sitter to parse the code and splits at semantically meaningful
@@ -140,6 +187,98 @@ pub fn supported_extensions() -> &'static [&'static str] {
 
 #[cfg(test)]
 mod tests {
+    // --- code chunking: spans over AST boundaries ------------------------------
+
+    const RUST_SRC: &str = r#"
+use std::fmt;
+
+/// First function.
+pub fn alpha(x: i32) -> i32 {
+    let y = x * 2;
+    y + 1
+}
+
+/// Second function.
+pub fn beta(s: &str) -> String {
+    s.to_uppercase()
+}
+
+struct Gamma { field: usize }
+
+impl Gamma {
+    fn new() -> Self { Self { field: 0 } }
+}
+"#;
+
+    #[test]
+    fn code_spans_slice_the_source_exactly_and_carry_fingerprints() {
+        let spans = code_spans(RUST_SRC, CodeLanguage::Rust, 120).expect("chunks");
+        assert!(spans.len() > 1);
+        for s in &spans {
+            assert_eq!(
+                &RUST_SRC[s.start..s.end],
+                s.text,
+                "span must slice the source"
+            );
+            assert!(s.fingerprint.starts_with("xxh3:"));
+            assert!(s.line_start >= 1 && s.line_end >= s.line_start);
+        }
+    }
+
+    #[test]
+    fn code_spans_respect_item_boundaries_rather_than_character_counts() {
+        let spans = code_spans(RUST_SRC, CodeLanguage::Rust, 120).expect("chunks");
+        // a tree-sitter split should not orphan a brace from its function signature
+        let broken = spans
+            .iter()
+            .filter(|s| {
+                let t = s.text.trim();
+                t.starts_with('}')
+                    && !t.contains("fn")
+                    && !t.contains("impl")
+                    && !t.contains("struct")
+            })
+            .count();
+        assert_eq!(
+            broken, 0,
+            "no chunk should begin with a dangling close brace: {spans:#?}"
+        );
+    }
+
+    #[test]
+    fn code_spans_auto_detects_language_from_path() {
+        let spans = code_spans_auto(RUST_SRC, "src/lib.rs", 120).expect("detects rust");
+        let explicit = code_spans(RUST_SRC, CodeLanguage::Rust, 120).expect("explicit");
+        assert_eq!(spans, explicit, "auto and explicit must agree");
+    }
+
+    #[test]
+    fn code_spans_auto_rejects_an_unknown_extension() {
+        let err = code_spans_auto(RUST_SRC, "notes.xyz", 120).unwrap_err();
+        assert!(
+            err.contains("xyz"),
+            "error should name the extension: {err}"
+        );
+    }
+
+    #[test]
+    fn nth_code_chunk_matches_the_full_pass() {
+        let all = code_spans(RUST_SRC, CodeLanguage::Rust, 120).expect("chunks");
+        for (i, want) in all.iter().enumerate() {
+            assert_eq!(
+                &nth_code_chunk(RUST_SRC, CodeLanguage::Rust, 120, i)
+                    .unwrap()
+                    .unwrap(),
+                want
+            );
+        }
+        assert!(
+            nth_code_chunk(RUST_SRC, CodeLanguage::Rust, 120, all.len())
+                .unwrap()
+                .is_none()
+        );
+    }
+
     use super::*;
 
     #[test]
