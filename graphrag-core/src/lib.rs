@@ -50,6 +50,7 @@ pub mod error;
 pub mod export;
 pub mod leiden;
 pub mod lexical;
+pub mod mr;
 pub mod synonyms;
 pub mod vector_source;
 
@@ -74,6 +75,9 @@ pub use entity_types::{
 };
 pub use error::GraphRagError;
 pub use lexical::LexicalIndex;
+pub use mr::{
+    ExtractPrompt, ExtractResult, ExtractionStrategy, WorkUnit, apply_extract, plan_extract,
+};
 pub use vector_source::{BruteForceVectorSource, VectorCandidate, VectorCandidateSource};
 
 pub use leiden::{

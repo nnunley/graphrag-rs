@@ -202,6 +202,15 @@ impl Database {
             );
 
             -- Append-only capsule bodies with full fingerprint history.
+            -- Extraction checkpoint: records that a chunk was attempted,
+            -- with which model and what yield. A zero-triple chunk is terminal.
+            CREATE TABLE IF NOT EXISTS extractions (
+                chunk_id INTEGER PRIMARY KEY REFERENCES chunks(id) ON DELETE CASCADE,
+                model TEXT NOT NULL,
+                triple_count INTEGER NOT NULL,
+                extracted_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS capsules (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 capsule_id TEXT NOT NULL,
