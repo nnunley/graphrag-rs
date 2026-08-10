@@ -5,8 +5,9 @@
 use graphrag_core::Database;
 use graphrag_core::db::EntityInput;
 use graphrag_core::mr::{
-    ExtractPrompt, ExtractResult, ExtractionStrategy, SummaryResult, WorkUnit, apply_extract,
-    apply_summarize, plan_extract, plan_summarize,
+    EmbedResult, ExtractPrompt, ExtractResult, ExtractionStrategy, SummaryResult, WorkUnit,
+    apply_embed, apply_extract, apply_summarize, build_community_hierarchy, pipeline_status,
+    plan_embed, plan_extract, plan_summarize,
 };
 use tempfile::TempDir;
 
@@ -361,4 +362,443 @@ fn summarize_accepts_partial_and_out_of_order() {
         .map(|u| u.community_id.unwrap())
         .collect();
     assert_eq!(after, vec![pending[0]]);
+}
+
+// --- stage 2b: hierarchical summarization (GraphRAG paper, §3.1.5) ---------
+//
+// The paper builds community summaries bottom-up: leaf communities summarize
+// their elements, and higher-level communities substitute their SUB-COMMUNITY
+// summaries for element summaries. That is what lets a root summary describe
+// thousands of entities within a context window, and it is why root-level
+// summaries answer global questions at a fraction of the token cost.
+
+#[test]
+fn parent_is_not_plannable_until_children_are_summarized() {
+    let (_d, db) = db_with_chunks(1);
+    let parent = db.create_community("s", 1, 0.0, None).unwrap();
+    let child_a = db.create_community("s", 0, 0.0, Some(parent)).unwrap();
+    let child_b = db.create_community("s", 0, 0.0, Some(parent)).unwrap();
+
+    // only leaves are plannable at first
+    let ids: Vec<i64> = plan_summarize(&db, "s", "m", None)
+        .unwrap()
+        .iter()
+        .map(|u| u.community_id.unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        vec![child_a, child_b],
+        "parent must wait for its children"
+    );
+
+    apply_summarize(
+        &db,
+        "s",
+        &[SummaryResult {
+            community_id: child_a,
+            model: "m".into(),
+            response: "child A topic".into(),
+        }],
+    )
+    .unwrap();
+    let ids: Vec<i64> = plan_summarize(&db, "s", "m", None)
+        .unwrap()
+        .iter()
+        .map(|u| u.community_id.unwrap())
+        .collect();
+    assert_eq!(ids, vec![child_b], "one child still outstanding");
+
+    apply_summarize(
+        &db,
+        "s",
+        &[SummaryResult {
+            community_id: child_b,
+            model: "m".into(),
+            response: "child B topic".into(),
+        }],
+    )
+    .unwrap();
+    let ids: Vec<i64> = plan_summarize(&db, "s", "m", None)
+        .unwrap()
+        .iter()
+        .map(|u| u.community_id.unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        vec![parent],
+        "parent becomes plannable once children are done"
+    );
+}
+
+#[test]
+fn parent_prompt_substitutes_child_summaries_for_entities() {
+    let (_d, db) = db_with_chunks(1);
+    let units = plan_extract(&db, "s", "m", S, None).unwrap();
+    apply_extract(
+        &db,
+        "s",
+        S,
+        &[ExtractResult {
+            chunk_id: units[0].chunk_id,
+            model: "m".into(),
+            response: "Alice (Person) -[uses]-> GraphRAG (Software)".into(),
+        }],
+    )
+    .unwrap();
+
+    let parent = db.create_community("s", 1, 0.0, None).unwrap();
+    let child = db.create_community("s", 0, 0.0, Some(parent)).unwrap();
+    // both levels carry the entities, as hierarchical Leiden persists them
+    for e in db.list_entities("s").unwrap() {
+        db.link_entity_community(e.id, child).unwrap();
+        db.link_entity_community(e.id, parent).unwrap();
+    }
+    apply_summarize(
+        &db,
+        "s",
+        &[SummaryResult {
+            community_id: child,
+            model: "m".into(),
+            response: "Alice's use of GraphRAG tooling".into(),
+        }],
+    )
+    .unwrap();
+
+    let u = plan_summarize(&db, "s", "m", None).unwrap();
+    assert_eq!(u.len(), 1);
+    let p = &u[0];
+    assert_eq!(p.community_id, Some(parent));
+    assert!(
+        p.user.contains("Alice's use of GraphRAG tooling"),
+        "parent prompt must carry the child summary, got: {}",
+        p.user
+    );
+    assert!(
+        !p.user.contains("Alice (Person)"),
+        "parent prompt must NOT fall back to the raw entity list"
+    );
+}
+
+// --- pipeline status: which phases exist, what is ready, what went stale ----
+
+#[test]
+fn status_reports_every_phase_with_counts_and_readiness() {
+    let (_d, db) = db_with_chunks(3);
+    let st = pipeline_status(&db, "s").unwrap();
+    let names: Vec<&str> = st.phases.iter().map(|p| p.phase.as_str()).collect();
+    assert_eq!(names, vec!["extract", "embed", "communities", "summarize"]);
+
+    let ex = &st.phases[0];
+    assert_eq!((ex.total, ex.done, ex.pending), (3, 0, 3));
+    assert!(ex.ready, "extract is ready as soon as chunks exist");
+
+    // downstream phases cannot start yet and must say why
+    let comm = &st.phases[1];
+    assert!(!comm.ready);
+    assert!(
+        comm.blocked_by.as_deref() == Some("extract"),
+        "{:?}",
+        comm.blocked_by
+    );
+    assert!(!st.next.is_empty(), "status names a concrete next action");
+}
+
+#[test]
+fn status_detects_entities_that_appeared_after_community_detection() {
+    let (_d, db) = db_with_chunks(2);
+    let units = plan_extract(&db, "s", "m", S, None).unwrap();
+    apply_extract(
+        &db,
+        "s",
+        S,
+        &[ExtractResult {
+            chunk_id: units[0].chunk_id,
+            model: "m".into(),
+            response: "Alice (Person) -[uses]-> GraphRAG (Software)".into(),
+        }],
+    )
+    .unwrap();
+
+    // detect communities over what exists now
+    let c = db.create_community("s", 0, 0.0, None).unwrap();
+    for e in db.list_entities("s").unwrap() {
+        db.link_entity_community(e.id, c).unwrap();
+    }
+    let st = pipeline_status(&db, "s").unwrap();
+    assert_eq!(
+        st.phase("communities").unwrap().pending,
+        0,
+        "nothing new yet"
+    );
+
+    // a later extraction introduces entities the detection never saw
+    apply_extract(
+        &db,
+        "s",
+        S,
+        &[ExtractResult {
+            chunk_id: units[1].chunk_id,
+            model: "m".into(),
+            response: "Bruce (Person) -[reviews]-> leit (Software)".into(),
+        }],
+    )
+    .unwrap();
+    let st = pipeline_status(&db, "s").unwrap();
+    let comm = st.phase("communities").unwrap();
+    assert!(
+        comm.pending > 0,
+        "unclustered entities must surface as pending"
+    );
+    assert!(
+        comm.guidance.contains("enrich"),
+        "guidance names the command: {}",
+        comm.guidance
+    );
+}
+
+#[test]
+fn status_summarize_reports_hierarchy_and_blocked_parents() {
+    let (_d, db) = db_with_chunks(1);
+    let parent = db.create_community("s", 1, 0.0, None).unwrap();
+    let child = db.create_community("s", 0, 0.0, Some(parent)).unwrap();
+    let st = pipeline_status(&db, "s").unwrap();
+    let s = st.phase("summarize").unwrap();
+    assert_eq!(s.total, 2);
+    assert_eq!(s.pending, 1, "only the leaf is ready");
+    assert_eq!(s.blocked, 1, "the parent waits on its child");
+    assert_eq!(
+        s.levels,
+        vec![(0, 1, 0), (1, 1, 0)],
+        "(level, count, summarized)"
+    );
+
+    apply_summarize(
+        &db,
+        "s",
+        &[SummaryResult {
+            community_id: child,
+            model: "m".into(),
+            response: "leaf".into(),
+        }],
+    )
+    .unwrap();
+    let st = pipeline_status(&db, "s").unwrap();
+    let s = st.phase("summarize").unwrap();
+    assert_eq!(
+        (s.pending, s.blocked),
+        (1, 0),
+        "parent unblocks once the child is done"
+    );
+}
+
+// --- structural invariants of the community hierarchy ----------------------
+//
+// Norman's requirement: no orphaned nodes, and every community must chain up
+// to a single root that names the high-level concepts beneath it. A forest of
+// hundreds of parentless communities cannot answer a global question, because
+// there is no vantage point that sees everything.
+
+fn seed_connected_graph(db: &Database) {
+    // two dense clusters joined by one bridge — a graph with real structure
+    let pairs = [
+        ("Leiden", "modularity"),
+        ("Leiden", "community"),
+        ("modularity", "community"),
+        ("community", "summary"),
+        ("Leiden", "summary"),
+        ("BM25", "lexical"),
+        ("BM25", "scoring"),
+        ("lexical", "scoring"),
+        ("scoring", "ranking"),
+        ("BM25", "ranking"),
+        ("community", "ranking"), // the bridge
+    ];
+    for (h, t) in pairs {
+        let hid = db
+            .get_or_create_entity("s", h, Some("Concept"), None)
+            .unwrap();
+        let tid = db
+            .get_or_create_entity("s", t, Some("Concept"), None)
+            .unwrap();
+        db.add_relation("s", hid, tid, "relates_to", None).unwrap();
+    }
+}
+
+#[test]
+fn every_entity_belongs_to_a_community() {
+    let (_d, db) = db_with_chunks(1);
+    seed_connected_graph(&db);
+    build_community_hierarchy(&db, "s", Default::default()).unwrap();
+    assert_eq!(
+        db.unclustered_entity_count("s").unwrap(),
+        0,
+        "no entity may be orphaned from the hierarchy"
+    );
+}
+
+#[test]
+fn hierarchy_converges_to_exactly_one_root() {
+    let (_d, db) = db_with_chunks(1);
+    seed_connected_graph(&db);
+    build_community_hierarchy(&db, "s", Default::default()).unwrap();
+    let roots: Vec<_> = db
+        .list_communities("s")
+        .unwrap()
+        .into_iter()
+        .filter(|c| c.parent_id.is_none())
+        .collect();
+    assert_eq!(
+        roots.len(),
+        1,
+        "expected a single root, got {}",
+        roots.len()
+    );
+}
+
+#[test]
+fn every_community_reaches_the_root_by_following_parents() {
+    let (_d, db) = db_with_chunks(1);
+    seed_connected_graph(&db);
+    build_community_hierarchy(&db, "s", Default::default()).unwrap();
+    let all = db.list_communities("s").unwrap();
+    let by_id: std::collections::HashMap<i64, Option<i64>> =
+        all.iter().map(|c| (c.id, c.parent_id)).collect();
+    for c in &all {
+        let (mut cur, mut hops) = (c.id, 0);
+        while let Some(Some(p)) = by_id.get(&cur) {
+            cur = *p;
+            hops += 1;
+            assert!(hops < 100, "cycle in parent chain from community {}", c.id);
+        }
+        assert!(
+            by_id.contains_key(&cur),
+            "community {} chain left the store",
+            c.id
+        );
+        assert!(
+            by_id[&cur].is_none(),
+            "chain from {} did not end at a root",
+            c.id
+        );
+    }
+}
+
+#[test]
+fn root_is_coarser_than_its_children() {
+    let (_d, db) = db_with_chunks(1);
+    seed_connected_graph(&db);
+    build_community_hierarchy(&db, "s", Default::default()).unwrap();
+    let all = db.list_communities("s").unwrap();
+    let root = all.iter().find(|c| c.parent_id.is_none()).unwrap();
+    let kids = all.iter().filter(|c| c.parent_id == Some(root.id)).count();
+    assert!(
+        kids >= 2,
+        "a root that groups <2 children conveys nothing; got {kids}"
+    );
+    let root_members = db.get_community_entities(root.id).unwrap().len();
+    for c in all.iter().filter(|c| c.parent_id == Some(root.id)) {
+        assert!(
+            db.get_community_entities(c.id).unwrap().len() <= root_members,
+            "child community larger than its parent"
+        );
+    }
+}
+
+// --- phase: entity embedding ------------------------------------------------
+//
+// Entities need their own vectors on the RAG side. Lexical variants that stay
+// distinct nodes ("Leiden" / "Leiden algorithm" / "hierarchical Leiden") embed
+// at cosine 0.74-1.00 against each other and 0.24-0.31 against unrelated terms,
+// so with vectors present a query for any one surfaces all of them. Without
+// them the merge-candidate tooling is inert and variants never co-surface.
+
+#[test]
+fn plan_embed_lists_entities_without_vectors() {
+    let (_d, db) = db_with_chunks(1);
+    let u = plan_extract(&db, "s", "m", S, None).unwrap();
+    apply_extract(
+        &db,
+        "s",
+        S,
+        &[ExtractResult {
+            chunk_id: u[0].chunk_id,
+            model: "m".into(),
+            response: "Alice (Person) -[uses]-> GraphRAG (Software)".into(),
+        }],
+    )
+    .unwrap();
+
+    let units = plan_embed(&db, "s", None).unwrap();
+    assert_eq!(units.len(), 2, "both entities need vectors");
+    assert!(
+        units.iter().any(|e| e.text == "Alice (Person)"),
+        "text is type-qualified for embedding"
+    );
+    assert!(units.iter().all(|e| e.entity_id > 0));
+}
+
+#[test]
+fn apply_embed_persists_and_is_terminal() {
+    let (_d, db) = db_with_chunks(1);
+    let u = plan_extract(&db, "s", "m", S, None).unwrap();
+    apply_extract(
+        &db,
+        "s",
+        S,
+        &[ExtractResult {
+            chunk_id: u[0].chunk_id,
+            model: "m".into(),
+            response: "Alice (Person) -[uses]-> GraphRAG (Software)".into(),
+        }],
+    )
+    .unwrap();
+
+    let units = plan_embed(&db, "s", None).unwrap();
+    let results: Vec<EmbedResult> = units
+        .iter()
+        .map(|e| EmbedResult {
+            entity_id: e.entity_id,
+            vector: vec![0.1, 0.2, 0.3],
+        })
+        .collect();
+    assert_eq!(apply_embed(&db, "s", &results).unwrap(), 2);
+    assert!(
+        plan_embed(&db, "s", None).unwrap().is_empty(),
+        "embedded entities are terminal"
+    );
+    assert_eq!(
+        db.get_entity_embedding(units[0].entity_id)
+            .unwrap()
+            .unwrap(),
+        vec![0.1, 0.2, 0.3]
+    );
+}
+
+#[test]
+fn status_reports_embed_as_a_phase_between_extract_and_communities() {
+    let (_d, db) = db_with_chunks(1);
+    let u = plan_extract(&db, "s", "m", S, None).unwrap();
+    apply_extract(
+        &db,
+        "s",
+        S,
+        &[ExtractResult {
+            chunk_id: u[0].chunk_id,
+            model: "m".into(),
+            response: "Alice (Person) -[uses]-> GraphRAG (Software)".into(),
+        }],
+    )
+    .unwrap();
+
+    let st = pipeline_status(&db, "s").unwrap();
+    let names: Vec<&str> = st.phases.iter().map(|p| p.phase.as_str()).collect();
+    assert_eq!(names, vec!["extract", "embed", "communities", "summarize"]);
+    let e = st.phase("embed").unwrap();
+    assert_eq!((e.total, e.done, e.pending), (2, 0, 2));
+    assert!(e.ready);
+    assert!(
+        e.guidance.contains("embed"),
+        "guidance names the command: {}",
+        e.guidance
+    );
 }
