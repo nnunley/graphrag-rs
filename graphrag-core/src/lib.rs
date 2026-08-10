@@ -76,7 +76,8 @@ pub use entity_types::{
 pub use error::GraphRagError;
 pub use lexical::LexicalIndex;
 pub use mr::{
-    ExtractPrompt, ExtractResult, ExtractionStrategy, WorkUnit, apply_extract, plan_extract,
+    ExtractPrompt, ExtractResult, ExtractionStrategy, HierarchyConfig, HierarchyReport,
+    PhaseStatus, PipelineStatus, WorkUnit, apply_extract, plan_extract,
 };
 pub use vector_source::{BruteForceVectorSource, VectorCandidate, VectorCandidateSource};
 
