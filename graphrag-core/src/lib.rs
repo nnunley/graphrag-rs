@@ -95,7 +95,10 @@ pub use embedder::{
 };
 
 #[cfg(feature = "chunking")]
-pub use chunker::{ChunkerConfig, chunk_markdown, chunk_plain, chunk_text};
+pub use chunker::{
+    ChunkSpan, ChunkerConfig, chunk_markdown, chunk_plain, chunk_spans, chunk_text, nth_chunk,
+    review_spans,
+};
 
 #[cfg(feature = "code")]
 pub use code_chunker::{
