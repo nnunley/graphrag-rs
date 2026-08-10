@@ -48,4 +48,5 @@ tree-sitter-c = { version = "0.23", optional = true }
 tree-sitter-cpp = { version = "0.23", optional = true }
 
 [dev-dependencies]
+hegeltest = "0.29.4"
 tempfile = "3"
