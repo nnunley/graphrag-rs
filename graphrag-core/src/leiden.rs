@@ -108,6 +108,46 @@ impl CommunityGraph {
         }
     }
 
+    /// Build a graph from an edge list.
+    ///
+    /// Duplicate pairs are folded into a single weighted edge, so repeated
+    /// evidence for the same relationship strengthens it rather than being
+    /// discarded — the aggregation the GraphRAG design expects when many
+    /// chunks assert the same fact.
+    ///
+    /// ```
+    /// # use graphrag_core::leiden::CommunityGraph;
+    /// let g = CommunityGraph::from_edges([(1, 2, 1.0), (2, 3, 1.0)]);
+    /// assert_eq!(g.node_count(), 3);
+    /// ```
+    pub fn from_edges<I>(edges: I) -> Self
+    where
+        I: IntoIterator<Item = (i64, i64, f64)>,
+    {
+        let mut g = Self::new();
+        for (a, b, w) in edges {
+            g.add_edge(a, b, w);
+        }
+        g
+    }
+
+    /// Build a graph from an edge list plus a node roster.
+    ///
+    /// Nodes absent from every edge are still added, so an entity the
+    /// extractor never related to anything is clustered rather than dropped.
+    /// This is what lets the community hierarchy guarantee no orphans.
+    pub fn from_edges_and_nodes<E, N>(edges: E, nodes: N) -> Self
+    where
+        E: IntoIterator<Item = (i64, i64, f64)>,
+        N: IntoIterator<Item = i64>,
+    {
+        let mut g = Self::from_edges(edges);
+        for n in nodes {
+            g.add_node(n);
+        }
+        g
+    }
+
     /// Add a node to the graph, returns its index
     pub fn add_node(&mut self, node_id: i64) -> usize {
         if let Some(&idx) = self.node_to_idx.get(&node_id) {
@@ -562,6 +602,37 @@ impl CommunityGraph {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn from_edges_builds_the_same_graph_as_manual_construction() {
+        let edges = [(1i64, 2i64, 1.0), (2, 3, 2.0), (3, 1, 0.5)];
+        let mut manual = CommunityGraph::new();
+        for &(a, b, w) in &edges {
+            manual.add_edge(a, b, w);
+        }
+        let built = CommunityGraph::from_edges(edges);
+        assert_eq!(built.node_count(), manual.node_count());
+        assert_eq!(built.total_weight, manual.total_weight);
+    }
+
+    #[test]
+    fn from_edges_accepts_isolated_nodes_so_nothing_is_orphaned() {
+        // A node with no edges must still appear: callers rely on every entity
+        // being present for clustering, even when the extractor found no
+        // relation for it.
+        let g = CommunityGraph::from_edges_and_nodes([(1i64, 2i64, 1.0)], [1, 2, 99]);
+        assert_eq!(g.node_count(), 3, "isolated node 99 must be retained");
+    }
+
+    #[test]
+    fn from_edges_folds_duplicate_pairs_into_weight() {
+        let g = CommunityGraph::from_edges([(1i64, 2i64, 1.0), (1, 2, 3.0)]);
+        assert_eq!(g.node_count(), 2);
+        assert_eq!(
+            g.total_weight, 4.0,
+            "repeated evidence strengthens the edge"
+        );
+    }
+
     use super::*;
 
     #[test]
