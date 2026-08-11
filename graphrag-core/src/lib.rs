@@ -57,8 +57,10 @@ pub mod export;
 pub mod leiden;
 pub mod lexical;
 pub mod mr;
+pub mod paper;
 pub mod query;
 pub mod synonyms;
+pub mod token;
 pub mod vector_source;
 
 #[cfg(feature = "embeddings")]

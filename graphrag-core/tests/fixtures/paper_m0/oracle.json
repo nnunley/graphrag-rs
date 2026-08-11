@@ -1,0 +1,331 @@
+{
+  "schema_version": 1,
+  "fixture_id": "paper-m0-contract-v1",
+  "profile": {
+    "schema_version": 1,
+    "profile_id": "paper-test-v1",
+    "tokenizer": "test:unicode-whitespace:v1",
+    "chunk_tokens": 12,
+    "chunk_overlap_tokens": 3,
+    "report_call_window_tokens": 6,
+    "map_call_window_tokens": 55,
+    "reduce_call_window_tokens": 100,
+    "map_prompt_version": "fake-map-prompt-v1",
+    "map_response_schema_version": "paper-map-response-v1",
+    "reduce_prompt_version": "fake-reduce-prompt-v1",
+    "reduce_response_schema_version": "paper-reduce-response-v1"
+  },
+  "source_fingerprints": {
+    "doc-northstar-1": "sha256:b0b50809c926c407bb0f65074ab018169965fae603b873cad5e9313f5e170647",
+    "doc-northstar-2": "sha256:99a17fb6fe4ebcc0345d4da278b0bc1ba88ca6314111fd094d5c770f04e71bee",
+    "doc-atlas-1": "sha256:798ea9e2880c34e63e5b06906b5fb3f00a36446a6ba1da555fdd398d4183da2a",
+    "doc-atlas-2": "sha256:bc3ab9a486b863789f188c2a7a469490c59c2a778384eb83751f9bcdb4bc15d6",
+    "doc-harbor-1": "sha256:a93cdf4da10c1c34d2eec84c39555b341d8b5074e171ac36187053eca5277829",
+    "doc-harbor-2": "sha256:6170047fb08fd719f7aabd726ddea21faa64863d99b353f9a96b56999fd05c0c",
+    "doc-isolate-1": "sha256:bb0a9b1a57de2526f2ad78928a400c804da6ab1cf2c20abeec8e7b015243389b"
+  },
+  "fake_extractions": [
+    {
+      "source_id": "doc-northstar-1",
+      "entities": [
+        "Northstar Labs",
+        "Ember Analytics",
+        "Ava Chen"
+      ],
+      "relationships": [
+        {
+          "source": "Northstar Labs",
+          "target": "Ember Analytics",
+          "kind": "acquired"
+        }
+      ]
+    },
+    {
+      "source_id": "doc-northstar-2",
+      "entities": [
+        "Northstar Labs",
+        "Ember Analytics"
+      ],
+      "relationships": [
+        {
+          "source": "Northstar Labs",
+          "target": "Ember Analytics",
+          "kind": "acquired"
+        }
+      ]
+    },
+    {
+      "source_id": "doc-atlas-1",
+      "entities": [
+        "Northstar Labs",
+        "Ember Analytics",
+        "Atlas Cloud"
+      ],
+      "relationships": [
+        {
+          "source": "Northstar Labs",
+          "target": "Atlas Cloud",
+          "kind": "uses"
+        },
+        {
+          "source": "Ember Analytics",
+          "target": "Atlas Cloud",
+          "kind": "uses"
+        }
+      ]
+    },
+    {
+      "source_id": "doc-atlas-2",
+      "entities": [
+        "Ava Chen",
+        "Northstar Labs",
+        "Atlas Cloud",
+        "Ember Analytics"
+      ],
+      "relationships": [
+        {
+          "source": "Ava Chen",
+          "target": "Northstar Labs",
+          "kind": "leads"
+        },
+        {
+          "source": "Ava Chen",
+          "target": "Atlas Cloud",
+          "kind": "coordinates"
+        }
+      ]
+    },
+    {
+      "source_id": "doc-harbor-1",
+      "entities": [
+        "Harbor Clinic",
+        "Beacon Health Network",
+        "Mira Patel"
+      ],
+      "relationships": [
+        {
+          "source": "Harbor Clinic",
+          "target": "Beacon Health Network",
+          "kind": "uses"
+        },
+        {
+          "source": "Mira Patel",
+          "target": "Harbor Clinic",
+          "kind": "directs"
+        }
+      ]
+    },
+    {
+      "source_id": "doc-harbor-2",
+      "entities": [
+        "Beacon Health Network",
+        "Harbor Clinic"
+      ],
+      "relationships": [
+        {
+          "source": "Beacon Health Network",
+          "target": "Harbor Clinic",
+          "kind": "supports"
+        }
+      ]
+    },
+    {
+      "source_id": "doc-isolate-1",
+      "entities": [
+        "Solitary Archive – São Tomé"
+      ],
+      "relationships": []
+    }
+  ],
+  "repeated_entity": {
+    "name": "Northstar Labs",
+    "source_ids": [
+      "doc-northstar-1",
+      "doc-northstar-2",
+      "doc-atlas-1",
+      "doc-atlas-2"
+    ]
+  },
+  "repeated_relationship": {
+    "source": "Northstar Labs",
+    "target": "Ember Analytics",
+    "kind": "acquired",
+    "source_ids": [
+      "doc-northstar-1",
+      "doc-northstar-2"
+    ],
+    "support_count": 2
+  },
+  "isolated_entity": "Solitary Archive – São Tomé",
+  "cuts": [
+    {
+      "cut": 0,
+      "communities": [
+        {
+          "community_id": 101,
+          "members": [
+            "Northstar Labs",
+            "Ember Analytics",
+            "Ava Chen",
+            "Atlas Cloud"
+          ],
+          "parent_id": null,
+          "projected_from": null
+        },
+        {
+          "community_id": 102,
+          "members": [
+            "Harbor Clinic",
+            "Beacon Health Network",
+            "Mira Patel"
+          ],
+          "parent_id": null,
+          "projected_from": null
+        },
+        {
+          "community_id": 103,
+          "members": [
+            "Solitary Archive – São Tomé"
+          ],
+          "parent_id": null,
+          "projected_from": null
+        }
+      ]
+    },
+    {
+      "cut": 1,
+      "communities": [
+        {
+          "community_id": 201,
+          "members": [
+            "Northstar Labs",
+            "Ava Chen"
+          ],
+          "parent_id": 101,
+          "projected_from": null
+        },
+        {
+          "community_id": 202,
+          "members": [
+            "Ember Analytics",
+            "Atlas Cloud"
+          ],
+          "parent_id": 101,
+          "projected_from": null
+        },
+        {
+          "community_id": 203,
+          "members": [
+            "Harbor Clinic",
+            "Mira Patel"
+          ],
+          "parent_id": 102,
+          "projected_from": null
+        },
+        {
+          "community_id": 204,
+          "members": [
+            "Beacon Health Network"
+          ],
+          "parent_id": 102,
+          "projected_from": null
+        },
+        {
+          "community_id": 205,
+          "members": [
+            "Solitary Archive – São Tomé"
+          ],
+          "parent_id": 103,
+          "projected_from": 103
+        }
+      ]
+    }
+  ],
+  "oversized_community": {
+    "community_id": 101,
+    "element_context": "Northstar Labs Ember Analytics Ava Chen Atlas Cloud share migration and forecasting evidence."
+  },
+  "questions": [
+    {
+      "question_id": "q-main",
+      "text": "What are the main themes across the entire corpus?",
+      "seed": 42,
+      "map_answers": [
+        {
+          "report_id": "report:community:102:v1",
+          "helpfulness": 70,
+          "answer": "Regional healthcare depends on Beacon referrals.",
+          "referenced_report_ids": [
+            "report:community:102:v1"
+          ]
+        },
+        {
+          "report_id": "report:community:101:v1",
+          "helpfulness": 90,
+          "answer": "Analytics cloud infrastructure connects Northstar and Ember.",
+          "referenced_report_ids": [
+            "report:community:101:v1"
+          ]
+        },
+        {
+          "report_id": "report:community:103:v1",
+          "helpfulness": 50,
+          "answer": "An isolated archive forms a separate theme.",
+          "referenced_report_ids": [
+            "report:community:103:v1"
+          ]
+        }
+      ],
+      "reduce_answer": "The corpus covers analytics cloud infrastructure, regional healthcare, and an isolated archive.",
+      "reduce_references": [
+        "report:community:101:v1",
+        "report:community:102:v1",
+        "report:community:103:v1"
+      ],
+      "required_aspects": [
+        "analytics cloud infrastructure",
+        "regional healthcare",
+        "isolated archive"
+      ]
+    },
+    {
+      "question_id": "q-deps",
+      "text": "How do organizations depend on shared infrastructure?",
+      "seed": 7,
+      "map_answers": [
+        {
+          "report_id": "report:community:103:v1",
+          "helpfulness": 0,
+          "answer": "",
+          "referenced_report_ids": []
+        },
+        {
+          "report_id": "report:community:102:v1",
+          "helpfulness": 60,
+          "answer": "Harbor Clinic depends on Beacon Health Network.",
+          "referenced_report_ids": [
+            "report:community:102:v1"
+          ]
+        },
+        {
+          "report_id": "report:community:101:v1",
+          "helpfulness": 80,
+          "answer": "Northstar and Ember depend on Atlas Cloud.",
+          "referenced_report_ids": [
+            "report:community:101:v1"
+          ]
+        }
+      ],
+      "reduce_answer": "Atlas Cloud and Beacon Health Network are shared infrastructure for two organization groups.",
+      "reduce_references": [
+        "report:community:101:v1",
+        "report:community:102:v1"
+      ],
+      "required_aspects": [
+        "Atlas Cloud",
+        "Beacon Health Network",
+        "two organization groups"
+      ]
+    }
+  ]
+}

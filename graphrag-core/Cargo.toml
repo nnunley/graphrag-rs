@@ -9,6 +9,10 @@ license = "MIT"
 name = "graphrag_core"
 path = "src/lib.rs"
 
+[[example]]
+name = "test_code_chunking"
+required-features = ["code"]
+
 [features]
 default = ["embeddings", "chunking"]
 embeddings = ["fastembed"]
