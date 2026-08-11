@@ -61,6 +61,24 @@ pub fn export_store(db: &Database, store: &str, out: &mut impl Write) -> Result<
         )?;
     }
 
+    for provenance in db.list_extraction_provenance(store)? {
+        writeln!(
+            out,
+            "{}",
+            json!({
+                "record": "extraction_provenance",
+                "provenance_nonce": provenance.nonce,
+                "chunk_id": provenance.chunk_id,
+                "model": provenance.model,
+                "triple_count": provenance.triple_count,
+                "response_sha256": provenance.response_sha256,
+                "extracted_at": provenance.extracted_at,
+                "entity_ids": provenance.entities.iter().map(|entity| entity.id).collect::<Vec<_>>(),
+                "relation_ids": provenance.relations.iter().map(|relation| relation.id).collect::<Vec<_>>(),
+            })
+        )?;
+    }
+
     let mut communities = db.list_communities(store)?;
     communities.sort_by_key(|c| c.id);
     for c in communities {

@@ -23,8 +23,9 @@
 
 use crate::db::{Database, EntityInput};
 use crate::error::GraphRagError;
-use rusqlite::params;
+use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// Prompt for one unit, as produced by an injected strategy.
 pub struct ExtractPrompt {
@@ -58,6 +59,10 @@ pub struct WorkUnit {
     pub user: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<serde_json::Value>,
+    /// Opaque correlation token for extraction work. Executors must echo it
+    /// unchanged in [`ExtractResult`]. Absent for non-extraction stages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance_nonce: Option<String>,
 }
 
 /// A completed unit, as returned by the executor.
@@ -65,6 +70,8 @@ pub struct WorkUnit {
 pub struct ExtractResult {
     pub chunk_id: i64,
     pub model: String,
+    /// Must exactly match the nonce emitted by [`plan_extract`].
+    pub provenance_nonce: String,
     pub response: String,
 }
 
@@ -96,17 +103,53 @@ pub fn plan_extract(
                 system: p.system,
                 user: p.user,
                 format: p.format,
+                provenance_nonce: Some(extraction_provenance_nonce(
+                    store, chunk_id, model, &content,
+                )),
             }
         })
         .collect())
 }
 
-/// Parse and persist executor results; checkpoint every chunk touched.
+/// Content-derived correlation token for one planned extraction.
 ///
-/// Returns the number of triples persisted. Results may arrive partially and
-/// out of order — each unit is independent, so a crashed executor run leaves
-/// the remainder pending. Malformed replies persist nothing but still
-/// checkpoint: the attempt happened, and replanning it would loop forever.
+/// This is a provenance nonce, not an authentication secret. It is stable so
+/// planning remains pure and retries can echo the same token without a mutable
+/// job table. Including the store, chunk identity/content, and model makes a
+/// stale or cross-store result fail before it can write graph objects.
+pub fn extraction_provenance_nonce(
+    store: &str,
+    chunk_id: i64,
+    model: &str,
+    content: &str,
+) -> String {
+    let mut hash = Sha256::new();
+    for part in [
+        store.as_bytes(),
+        &chunk_id.to_be_bytes(),
+        model.as_bytes(),
+        content.as_bytes(),
+    ] {
+        hash.update((part.len() as u64).to_be_bytes());
+        hash.update(part);
+    }
+    let digest = hash.finalize();
+    format!("extract:sha256:{}", hex_bytes(&digest))
+}
+
+fn response_sha256(response: &str) -> String {
+    hex_bytes(&Sha256::digest(response.as_bytes()))
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Parse and atomically persist executor results with exact provenance.
+///
+/// Every result must echo the nonce emitted by [`plan_extract`]. The checkpoint,
+/// involved entities, and emitted relations commit in one transaction. A bad
+/// nonce writes nothing; re-applying the same nonce is a no-op.
 pub fn apply_extract(
     db: &Database,
     store: &str,
@@ -115,15 +158,47 @@ pub fn apply_extract(
 ) -> Result<usize, GraphRagError> {
     db.get_store(store)?;
     let mut persisted = 0usize;
-    for r in results {
-        let triples = strategy.parse(&r.response);
-        for t in &triples {
-            db.persist_triple(store, r.chunk_id, t)?;
-        }
-        persisted += triples.len();
-        db.checkpoint_extraction(r.chunk_id, &r.model, triples.len())?;
+    for result in results {
+        let triples = strategy.parse(&result.response);
+        persisted += apply_extracted_entities(db, store, result, &triples)?;
     }
     Ok(persisted)
+}
+
+/// Atomically persist already-parsed extraction output with exact provenance.
+///
+/// This is the only supported write path for extraction implementations that
+/// parse or accumulate triples outside [`ExtractionStrategy`], such as MCP
+/// sampling with reflection passes.
+pub fn apply_extracted_entities(
+    db: &Database,
+    store: &str,
+    result: &ExtractResult,
+    triples: &[EntityInput],
+) -> Result<usize, GraphRagError> {
+    db.get_store(store)?;
+    let content = db
+        .conn()
+        .query_row(
+            "SELECT content FROM chunks WHERE id = ?1 AND store = ?2",
+            params![result.chunk_id, store],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .ok_or_else(|| {
+            GraphRagError::Other(format!(
+                "extraction chunk {} does not belong to store {store:?}",
+                result.chunk_id
+            ))
+        })?;
+    let expected = extraction_provenance_nonce(store, result.chunk_id, &result.model, &content);
+    if result.provenance_nonce != expected {
+        return Err(GraphRagError::Other(format!(
+            "invalid extraction provenance nonce for chunk {}",
+            result.chunk_id
+        )));
+    }
+    db.persist_extraction(store, result, triples)
 }
 
 impl Database {
@@ -151,40 +226,140 @@ impl Database {
         Ok(out)
     }
 
-    /// Persist one triple and its chunk provenance. Entities are get-or-create,
-    /// so re-applying the same result does not duplicate them.
-    pub fn persist_triple(
+    fn persist_extraction(
         &self,
         store: &str,
-        chunk_id: i64,
-        t: &EntityInput,
-    ) -> Result<(), GraphRagError> {
-        let head_id = self.get_or_create_entity(store, &t.head, t.head_type.as_deref(), None)?;
-        let tail_id = self.get_or_create_entity(store, &t.tail, t.tail_type.as_deref(), None)?;
-        self.add_relation(store, head_id, tail_id, &t.relation, None)?;
-        self.link_chunk_entity(chunk_id, head_id)?;
-        self.link_chunk_entity(chunk_id, tail_id)?;
-        Ok(())
-    }
-
-    /// Record that `chunk_id` was attempted. Idempotent by chunk.
-    pub fn checkpoint_extraction(
-        &self,
-        chunk_id: i64,
-        model: &str,
-        triple_count: usize,
-    ) -> Result<(), GraphRagError> {
-        self.conn().execute(
-            "INSERT INTO extractions (chunk_id, model, triple_count, extracted_at)
-             VALUES (?1, ?2, ?3, datetime('now'))
-             ON CONFLICT(chunk_id) DO UPDATE SET
-               model = excluded.model,
-               triple_count = excluded.triple_count,
-               extracted_at = excluded.extracted_at",
-            params![chunk_id, model, triple_count as i64],
+        result: &ExtractResult,
+        triples: &[EntityInput],
+    ) -> Result<usize, GraphRagError> {
+        let tx = self.conn().unchecked_transaction()?;
+        let inserted = tx.execute(
+            "INSERT INTO extractions
+                 (chunk_id, model, triple_count, extracted_at, provenance_nonce, response_sha256)
+             VALUES (?1, ?2, ?3, datetime('now'), ?4, ?5)
+             ON CONFLICT(chunk_id) DO NOTHING",
+            params![
+                result.chunk_id,
+                result.model,
+                triples.len() as i64,
+                result.provenance_nonce,
+                response_sha256(&result.response)
+            ],
         )?;
-        Ok(())
+        if inserted == 0 {
+            let existing: (Option<String>, Option<String>) = tx.query_row(
+                "SELECT provenance_nonce, response_sha256 FROM extractions WHERE chunk_id = ?1",
+                params![result.chunk_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            let response_hash = response_sha256(&result.response);
+            if existing.0.as_deref() == Some(result.provenance_nonce.as_str())
+                && existing.1.as_deref() == Some(response_hash.as_str())
+            {
+                tx.commit()?;
+                return Ok(0);
+            }
+            return Err(GraphRagError::Other(format!(
+                "chunk {} already has a different or legacy extraction checkpoint",
+                result.chunk_id
+            )));
+        }
+
+        for triple in triples {
+            let head_id =
+                tx_get_or_create_entity(&tx, store, &triple.head, triple.head_type.as_deref())?;
+            let tail_id =
+                tx_get_or_create_entity(&tx, store, &triple.tail, triple.tail_type.as_deref())?;
+            let relation_id = tx_add_relation(&tx, store, head_id, tail_id, &triple.relation)?;
+            for entity_id in [head_id, tail_id] {
+                tx.execute(
+                    "INSERT OR IGNORE INTO chunk_entities (chunk_id, entity_id) VALUES (?1, ?2)",
+                    params![result.chunk_id, entity_id],
+                )?;
+                tx.execute(
+                    "INSERT OR IGNORE INTO extraction_entities
+                         (provenance_nonce, entity_id) VALUES (?1, ?2)",
+                    params![result.provenance_nonce, entity_id],
+                )?;
+            }
+            tx.execute(
+                "INSERT INTO extraction_relations (provenance_nonce, relation_id)
+                 VALUES (?1, ?2)",
+                params![result.provenance_nonce, relation_id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(triples.len())
     }
+}
+
+fn tx_get_or_create_entity(
+    tx: &Transaction<'_>,
+    store: &str,
+    name: &str,
+    entity_type: Option<&str>,
+) -> Result<i64, GraphRagError> {
+    let name = name.trim();
+    let existing = tx
+        .query_row(
+            "SELECT id FROM entities
+             WHERE store = ?1 AND LOWER(TRIM(name)) = LOWER(TRIM(?2))
+             ORDER BY id LIMIT 1",
+            params![store, name],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?;
+    if let Some(id) = existing {
+        if entity_type.is_some() {
+            tx.execute(
+                "UPDATE entities SET entity_type = COALESCE(?2, entity_type) WHERE id = ?1",
+                params![id, entity_type],
+            )?;
+        }
+        return Ok(id);
+    }
+    tx.execute(
+        "INSERT INTO entities (store, name, entity_type, properties)
+         VALUES (?1, ?2, ?3, NULL)",
+        params![store, name, entity_type],
+    )?;
+    Ok(tx.last_insert_rowid())
+}
+
+fn tx_add_relation(
+    tx: &Transaction<'_>,
+    store: &str,
+    head_id: i64,
+    tail_id: i64,
+    relation: &str,
+) -> Result<i64, GraphRagError> {
+    let canonical = tx
+        .query_row(
+            "SELECT canonical_relation FROM relation_synonyms WHERE raw_relation = ?1",
+            params![relation],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    if let Some(id) = tx
+        .query_row(
+            "SELECT id FROM relations
+             WHERE store = ?1 AND head_id = ?2 AND tail_id = ?3
+               AND relation = ?4 AND properties IS NULL
+             ORDER BY id LIMIT 1",
+            params![store, head_id, tail_id, relation],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+    {
+        return Ok(id);
+    }
+    tx.execute(
+        "INSERT INTO relations
+             (store, head_id, tail_id, relation, canonical_relation, properties)
+         VALUES (?1, ?2, ?3, ?4, ?5, NULL)",
+        params![store, head_id, tail_id, relation, canonical],
+    )?;
+    Ok(tx.last_insert_rowid())
 }
 
 // --- stage 2: community -> summary ----------------------------------------
@@ -264,6 +439,7 @@ pub fn plan_summarize(
             system: SUMMARY_SYSTEM.into(),
             user,
             format: None,
+            provenance_nonce: None,
         });
     }
     Ok(units)

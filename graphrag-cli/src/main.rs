@@ -4,7 +4,7 @@ use graphrag_core::{
     LexicalIndex, RemoteEmbedderConfig, VectorCandidateSource, default_embedder_cache_dir,
     load_standard_synonyms, load_standard_type_synonyms,
 };
-use graphrag_llm::{ChatClient, EntityTriple, OllamaChatClient, strategy_for_model};
+use graphrag_llm::{ChatClient, ChatPrompt, OllamaChatClient};
 use std::collections::HashMap;
 mod llm_strategy;
 
@@ -161,6 +161,14 @@ enum Commands {
     Apply {
         /// Stage to apply: extract | summarize
         stage: String,
+        /// Store name
+        #[arg(long)]
+        store: Option<String>,
+    },
+    /// Resolve an extraction nonce to its exact entities and relations
+    Provenance {
+        /// Opaque nonce emitted by extraction planning
+        nonce: String,
         /// Store name
         #[arg(long)]
         store: Option<String>,
@@ -578,23 +586,31 @@ fn extract_entities_for_chunks<C: ChatClient>(
     client: &C,
     model: &str,
 ) -> Result<usize, String> {
-    let chunks = db
-        .list_chunks(store)
-        .map_err(|e| format!("list chunks: {e}"))?;
-    let total = chunks.len();
+    use graphrag_core::mr::{ExtractResult, apply_extract, plan_extract};
+
+    let strategy = llm_strategy::LlmStrategy::for_model(model);
+    let units = plan_extract(db, store, model, &strategy, None)
+        .map_err(|e| format!("plan extraction: {e}"))?;
+    let total = units.len();
     let mut extracted = 0;
 
-    // Resolve the per-model extraction strategy (2026-08-03 spike): triple-lines default,
-    // JSON for nemotron-class. The strategy owns prompt-build, output-format, and parse.
-    let strategy = strategy_for_model(model);
-    let response_format = strategy.response_format();
-
-    for (idx, chunk) in chunks.iter().enumerate() {
-        let prompt = strategy.build_prompt(&chunk.content, idx, total);
-        let response = client.complete_with_format(&prompt, response_format.as_ref())?;
-        let parsed = strategy.parse(&response);
-        persist_entity_triples(db, store, chunk.id, &parsed.triples)?;
-        extracted += parsed.triples.len();
+    for (idx, unit) in units.into_iter().enumerate() {
+        let prompt = ChatPrompt {
+            system: unit.system,
+            user: unit.user,
+            max_tokens: 1000,
+        };
+        let response = client.complete_with_format(&prompt, unit.format.as_ref())?;
+        let result = ExtractResult {
+            chunk_id: unit.chunk_id,
+            model: unit.model,
+            provenance_nonce: unit
+                .provenance_nonce
+                .ok_or_else(|| "planned extraction missing provenance nonce".to_string())?,
+            response,
+        };
+        extracted += apply_extract(db, store, &strategy, &[result])
+            .map_err(|e| format!("apply extraction: {e}"))?;
 
         let completed = idx + 1;
         if completed == total || completed % 25 == 0 {
@@ -603,30 +619,6 @@ fn extract_entities_for_chunks<C: ChatClient>(
     }
 
     Ok(extracted)
-}
-
-fn persist_entity_triples(
-    db: &Database,
-    store: &str,
-    chunk_id: i64,
-    triples: &[EntityTriple],
-) -> Result<(), String> {
-    for triple in triples {
-        let head_id = db
-            .get_or_create_entity(store, &triple.head, triple.head_type.as_deref(), None)
-            .map_err(|e| format!("create head entity: {e}"))?;
-        let tail_id = db
-            .get_or_create_entity(store, &triple.tail, triple.tail_type.as_deref(), None)
-            .map_err(|e| format!("create tail entity: {e}"))?;
-        db.add_relation(store, head_id, tail_id, &triple.relation, None)
-            .map_err(|e| format!("add relation: {e}"))?;
-        db.link_chunk_entity(chunk_id, head_id)
-            .map_err(|e| format!("link head entity: {e}"))?;
-        db.link_chunk_entity(chunk_id, tail_id)
-            .map_err(|e| format!("link tail entity: {e}"))?;
-    }
-
-    Ok(())
 }
 
 fn persist_flat_communities(
@@ -997,6 +989,55 @@ fn cmd_status(store: &str, json: bool) -> Result<(), String> {
     Ok(())
 }
 
+fn cmd_provenance(store: &str, nonce: &str) -> Result<(), String> {
+    let db = open_db()?;
+    let provenance = db
+        .get_extraction_provenance(store, nonce)
+        .map_err(|e| format!("provenance: {e}"))?
+        .ok_or_else(|| format!("no extraction provenance {nonce:?} in store {store:?}"))?;
+    let entities = provenance
+        .entities
+        .iter()
+        .map(|entity| {
+            serde_json::json!({
+                "id": entity.id,
+                "name": entity.name,
+                "entity_type": entity.entity_type,
+                "properties": entity.properties,
+            })
+        })
+        .collect::<Vec<_>>();
+    let relations = provenance
+        .relations
+        .iter()
+        .map(|relation| {
+            serde_json::json!({
+                "id": relation.id,
+                "head_id": relation.head_id,
+                "tail_id": relation.tail_id,
+                "relation": relation.relation,
+                "canonical_relation": relation.canonical_relation,
+                "properties": relation.properties,
+            })
+        })
+        .collect::<Vec<_>>();
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "provenance_nonce": provenance.nonce,
+            "chunk_id": provenance.chunk_id,
+            "model": provenance.model,
+            "triple_count": provenance.triple_count,
+            "response_sha256": provenance.response_sha256,
+            "extracted_at": provenance.extracted_at,
+            "entities": entities,
+            "relations": relations,
+        }))
+        .map_err(|e| format!("serialize provenance: {e}"))?
+    );
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
@@ -1078,6 +1119,9 @@ fn main() -> ExitCode {
         ),
         Commands::Apply { stage, store } => {
             cmd_apply(&stage, store.as_deref().unwrap_or(DEFAULT_STORE))
+        }
+        Commands::Provenance { nonce, store } => {
+            cmd_provenance(store.as_deref().unwrap_or(DEFAULT_STORE), &nonce)
         }
     };
     match result {

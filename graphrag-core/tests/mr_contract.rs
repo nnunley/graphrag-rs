@@ -6,9 +6,12 @@ use graphrag_core::Database;
 use graphrag_core::db::EntityInput;
 use graphrag_core::mr::{
     EmbedResult, ExtractPrompt, ExtractResult, ExtractionStrategy, SummaryResult, WorkUnit,
-    apply_embed, apply_extract, apply_summarize, build_community_hierarchy, pipeline_status,
-    plan_embed, plan_extract, plan_summarize,
+    apply_embed, apply_extract, apply_summarize, build_community_hierarchy,
+    extraction_provenance_nonce, pipeline_status, plan_embed, plan_extract, plan_summarize,
 };
+use hegel::TestCase;
+use hegel::generators as gs;
+use rusqlite::Connection;
 use tempfile::TempDir;
 
 /// Minimal strategy so the contract is exercised with no model and no
@@ -70,6 +73,78 @@ fn db_with_chunks(n: usize) -> (TempDir, Database) {
     (dir, db)
 }
 
+#[test]
+fn legacy_checkpoint_migrates_without_fabricating_exact_provenance() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("legacy.db");
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE stores (
+             name TEXT PRIMARY KEY, dim INTEGER NOT NULL, created_at TEXT
+         );
+         CREATE TABLE chunks (
+             id INTEGER PRIMARY KEY, store TEXT NOT NULL, content TEXT NOT NULL,
+             source TEXT, metadata TEXT, created_at TEXT
+         );
+         CREATE TABLE extractions (
+             chunk_id INTEGER PRIMARY KEY, model TEXT NOT NULL,
+             triple_count INTEGER NOT NULL, extracted_at TEXT NOT NULL
+         );
+         INSERT INTO stores VALUES ('s', 3, datetime('now'));
+         INSERT INTO chunks VALUES (1, 's', 'legacy chunk', NULL, NULL, datetime('now'));
+         INSERT INTO extractions VALUES (1, 'legacy-model', 2, datetime('now'));",
+    )
+    .unwrap();
+    drop(conn);
+
+    let db = Database::open(&path).unwrap();
+    assert!(plan_extract(&db, "s", "m", S, None).unwrap().is_empty());
+    assert!(
+        db.get_extraction_provenance("s", "legacy:chunk:1")
+            .unwrap()
+            .is_none()
+    );
+    let nonce = extraction_provenance_nonce("s", 1, "m", "legacy chunk");
+    assert!(
+        apply_extract(
+            &db,
+            "s",
+            S,
+            &[ExtractResult {
+                chunk_id: 1,
+                model: "m".into(),
+                provenance_nonce: nonce,
+                response: "A (Thing) -[links]-> B (Thing)".into(),
+            }],
+        )
+        .is_err(),
+        "legacy checkpoint must conflict rather than acquire fabricated provenance"
+    );
+    assert!(db.list_entities("s").unwrap().is_empty());
+    drop(db);
+
+    let conn = Connection::open(path).unwrap();
+    for column in ["provenance_nonce", "response_sha256"] {
+        let present: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('extractions') WHERE name = ?1",
+                [column],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(present, "migration adds {column}");
+    }
+    let links: i64 = conn
+        .query_row("SELECT COUNT(*) FROM extraction_relations", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        links, 0,
+        "legacy edges are unknowable and must not be inferred"
+    );
+}
+
 // --- plan -----------------------------------------------------------------
 
 #[test]
@@ -95,6 +170,16 @@ fn plan_is_ordered_and_stable() {
     sorted.sort();
     assert_eq!(ids, sorted, "units ascend by chunk id");
     assert_eq!(ids, b.iter().map(|u| u.chunk_id).collect::<Vec<_>>());
+    assert!(a.iter().all(|u| u.provenance_nonce.is_some()));
+    assert_eq!(
+        a.iter()
+            .map(|u| u.provenance_nonce.as_deref())
+            .collect::<Vec<_>>(),
+        b.iter()
+            .map(|u| u.provenance_nonce.as_deref())
+            .collect::<Vec<_>>(),
+        "pure replanning must emit the same correlation nonce"
+    );
 }
 
 #[test]
@@ -108,6 +193,7 @@ fn plan_excludes_already_extracted_chunks() {
         &[ExtractResult {
             chunk_id: units[0].chunk_id,
             model: "gemma4:31b".into(),
+            provenance_nonce: units[0].provenance_nonce.clone().unwrap(),
             response: "Alice (Person) -[uses]-> GraphRAG (Software)".into(),
         }],
     )
@@ -141,6 +227,7 @@ fn apply_persists_triples_and_checkpoint() {
         &[ExtractResult {
             chunk_id: u.chunk_id,
             model: "gemma4:31b".into(),
+            provenance_nonce: u.provenance_nonce.clone().unwrap(),
             response: "Alice (Person) -[uses]-> GraphRAG (Software)".into(),
         }],
     )
@@ -167,11 +254,19 @@ fn zero_yield_is_terminal_not_pending_forever() {
         &[ExtractResult {
             chunk_id: u.chunk_id,
             model: "m".into(),
+            provenance_nonce: u.provenance_nonce.clone().unwrap(),
             response: "".into(),
         }],
     )
     .unwrap();
     assert_eq!(n, 0);
+    let provenance = db
+        .get_extraction_provenance("s", u.provenance_nonce.as_deref().unwrap())
+        .unwrap()
+        .expect("zero-yield extraction remains resolvable");
+    assert_eq!(provenance.triple_count, 0);
+    assert!(provenance.entities.is_empty());
+    assert!(provenance.relations.is_empty());
     assert!(
         plan_extract(&db, "s", "m", S, None).unwrap().is_empty(),
         "zero-yield chunk must be marked done, not replanned"
@@ -185,29 +280,307 @@ fn apply_is_idempotent() {
     let r = ExtractResult {
         chunk_id: u.chunk_id,
         model: "m".into(),
+        provenance_nonce: u.provenance_nonce.clone().unwrap(),
         response: "Alice (Person) -[uses]-> GraphRAG (Software)".into(),
     };
     apply_extract(&db, "s", S, std::slice::from_ref(&r)).unwrap();
-    let before = db.list_entities("s").unwrap().len();
+    let entities_before = db.list_entities("s").unwrap().len();
+    let relations_before = db.list_relations("s").unwrap().len();
     apply_extract(&db, "s", S, std::slice::from_ref(&r)).unwrap();
+    assert_eq!(db.list_entities("s").unwrap().len(), entities_before);
     assert_eq!(
-        db.list_entities("s").unwrap().len(),
-        before,
-        "re-apply must not duplicate"
+        db.list_relations("s").unwrap().len(),
+        relations_before,
+        "re-applying one nonce must not duplicate edges"
     );
+}
+
+#[test]
+fn replayed_nonce_with_changed_response_is_rejected() {
+    let (_d, db) = db_with_chunks(1);
+    let unit = plan_extract(&db, "s", "m", S, None).unwrap().remove(0);
+    let first = ExtractResult {
+        chunk_id: unit.chunk_id,
+        model: unit.model.clone(),
+        provenance_nonce: unit.provenance_nonce.clone().unwrap(),
+        response: "Alice (Person) -[uses]-> GraphRAG (Software)".into(),
+    };
+    apply_extract(&db, "s", S, std::slice::from_ref(&first)).unwrap();
+    let changed = ExtractResult {
+        response: "Alice (Person) -[abandons]-> GraphRAG (Software)".into(),
+        ..first
+    };
+    assert!(apply_extract(&db, "s", S, &[changed]).is_err());
+    assert_eq!(db.list_relations("s").unwrap().len(), 1);
+}
+
+#[test]
+fn provenance_nonce_resolves_exact_entities_and_edges() {
+    let (_d, db) = db_with_chunks(1);
+    let unrelated_head = db
+        .get_or_create_entity("s", "Unrelated", Some("Concept"), None)
+        .unwrap();
+    let unrelated_tail = db
+        .get_or_create_entity("s", "Noise", Some("Concept"), None)
+        .unwrap();
+    db.add_relation("s", unrelated_head, unrelated_tail, "distracts", None)
+        .unwrap();
+
+    let unit = plan_extract(&db, "s", "m", S, None).unwrap().remove(0);
+    let nonce = unit.provenance_nonce.clone().unwrap();
+    apply_extract(
+        &db,
+        "s",
+        S,
+        &[ExtractResult {
+            chunk_id: unit.chunk_id,
+            model: unit.model,
+            provenance_nonce: nonce.clone(),
+            response: "Alice (Person) -[uses]-> GraphRAG (Software)\nAlice (Person) -[maintains]-> Rust (Software)".into(),
+        }],
+    )
+    .unwrap();
+
+    db.create_store("other", 3).unwrap();
+    assert!(
+        db.get_extraction_provenance("other", &nonce)
+            .unwrap()
+            .is_none(),
+        "nonce lookup is store-scoped"
+    );
+    let provenance = db
+        .get_extraction_provenance("s", &nonce)
+        .unwrap()
+        .expect("nonce resolves");
+    assert_eq!(provenance.chunk_id, unit.chunk_id);
+    assert_eq!(provenance.triple_count, 2);
+    assert_eq!(provenance.relations.len(), 2);
+    let names: Vec<_> = provenance
+        .entities
+        .iter()
+        .map(|entity| entity.name.as_str())
+        .collect();
+    assert_eq!(names, vec!["Alice", "GraphRAG", "Rust"]);
+    assert!(
+        provenance
+            .relations
+            .iter()
+            .all(|relation| relation.relation != "distracts"),
+        "nonce must not induce unrelated edges from the chunk/global graph"
+    );
+
+    let mut exported = Vec::new();
+    graphrag_core::export::export_store(&db, "s", &mut exported).unwrap();
+    let record = String::from_utf8(exported)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .find(|value| value["record"] == "extraction_provenance")
+        .expect("durable export includes exact provenance");
+    assert_eq!(record["provenance_nonce"], nonce);
+    assert_eq!(record["entity_ids"].as_array().unwrap().len(), 3);
+    assert_eq!(record["relation_ids"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn entity_merge_preserves_and_deduplicates_extraction_provenance() {
+    let (_d, db) = db_with_chunks(1);
+    let unit = plan_extract(&db, "s", "m", S, None).unwrap().remove(0);
+    let nonce = unit.provenance_nonce.clone().unwrap();
+    apply_extract(
+        &db,
+        "s",
+        S,
+        &[ExtractResult {
+            chunk_id: unit.chunk_id,
+            model: unit.model,
+            provenance_nonce: nonce.clone(),
+            response: "Alice (Person) -[uses]-> GraphRAG (Software)".into(),
+        }],
+    )
+    .unwrap();
+    let before = db.get_extraction_provenance("s", &nonce).unwrap().unwrap();
+    let alice = before
+        .entities
+        .iter()
+        .find(|entity| entity.name == "Alice")
+        .unwrap()
+        .id;
+    let graph = before
+        .entities
+        .iter()
+        .find(|entity| entity.name == "GraphRAG")
+        .unwrap()
+        .id;
+
+    db.merge_entities(graph, alice).unwrap();
+
+    let after = db.get_extraction_provenance("s", &nonce).unwrap().unwrap();
+    assert_eq!(after.entities.len(), 1);
+    assert_eq!(after.entities[0].id, graph);
+    assert_eq!(after.relations.len(), 1);
+    assert_eq!(
+        (after.relations[0].head_id, after.relations[0].tail_id),
+        (graph, graph)
+    );
+}
+
+#[test]
+fn mid_write_failure_rolls_back_checkpoint_entities_relations_and_links() {
+    let (dir, db) = db_with_chunks(1);
+    let unit = plan_extract(&db, "s", "m", S, None).unwrap().remove(0);
+    let nonce = unit.provenance_nonce.clone().unwrap();
+    let conn = Connection::open(dir.path().join("t.db")).unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER fail_second_provenance_relation
+         BEFORE INSERT ON extraction_relations
+         WHEN (SELECT COUNT(*) FROM extraction_relations) > 0
+         BEGIN SELECT RAISE(ABORT, 'injected mid-write failure'); END;",
+    )
+    .unwrap();
+    drop(conn);
+
+    let result = ExtractResult {
+        chunk_id: unit.chunk_id,
+        model: unit.model,
+        provenance_nonce: nonce.clone(),
+        response: "Alice (Person) -[uses]-> GraphRAG (Software)\nAlice (Person) -[maintains]-> Rust (Software)".into(),
+    };
+    assert!(apply_extract(&db, "s", S, &[result]).is_err());
+    assert!(db.list_entities("s").unwrap().is_empty());
+    assert!(db.list_relations("s").unwrap().is_empty());
+    assert!(db.get_extraction_provenance("s", &nonce).unwrap().is_none());
+    assert_eq!(plan_extract(&db, "s", "m", S, None).unwrap().len(), 1);
+}
+
+#[test]
+fn invalid_provenance_nonce_rolls_back_everything() {
+    let (_d, db) = db_with_chunks(1);
+    let unit = plan_extract(&db, "s", "m", S, None).unwrap().remove(0);
+    let result = ExtractResult {
+        chunk_id: unit.chunk_id,
+        model: unit.model,
+        provenance_nonce: "wrong".into(),
+        response: "Alice (Person) -[uses]-> GraphRAG (Software)".into(),
+    };
+    assert!(apply_extract(&db, "s", S, &[result]).is_err());
+    assert!(db.list_entities("s").unwrap().is_empty());
+    assert!(db.list_relations("s").unwrap().is_empty());
+    assert_eq!(plan_extract(&db, "s", "m", S, None).unwrap().len(), 1);
+    assert!(
+        db.get_extraction_provenance("s", "wrong")
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn reused_entity_is_linked_to_each_exact_extraction() {
+    let (_d, db) = db_with_chunks(2);
+    let units = plan_extract(&db, "s", "m", S, None).unwrap();
+    let make = |unit: &WorkUnit, response: &str| ExtractResult {
+        chunk_id: unit.chunk_id,
+        model: unit.model.clone(),
+        provenance_nonce: unit.provenance_nonce.clone().unwrap(),
+        response: response.into(),
+    };
+    apply_extract(
+        &db,
+        "s",
+        S,
+        &[make(
+            &units[0],
+            "Alice (Person) -[uses]-> GraphRAG (Software)",
+        )],
+    )
+    .unwrap();
+    apply_extract(
+        &db,
+        "s",
+        S,
+        &[make(
+            &units[1],
+            "GraphRAG (Software) -[indexes]-> Rust (Language)",
+        )],
+    )
+    .unwrap();
+
+    let first = db
+        .get_extraction_provenance("s", units[0].provenance_nonce.as_deref().unwrap())
+        .unwrap()
+        .unwrap();
+    let second = db
+        .get_extraction_provenance("s", units[1].provenance_nonce.as_deref().unwrap())
+        .unwrap()
+        .unwrap();
+    let first_graph = first
+        .entities
+        .iter()
+        .find(|entity| entity.name == "GraphRAG")
+        .unwrap()
+        .id;
+    let second_graph = second
+        .entities
+        .iter()
+        .find(|entity| entity.name == "GraphRAG")
+        .unwrap()
+        .id;
+    assert_eq!(
+        first_graph, second_graph,
+        "preexisting entity is linked, not copied"
+    );
+    assert_eq!(second.relations.len(), 1);
+    assert_eq!(
+        second
+            .entities
+            .iter()
+            .map(|entity| entity.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["GraphRAG", "Rust"]
+    );
+}
+
+#[test]
+fn repeated_global_edge_is_deduplicated_but_linked_to_each_extraction() {
+    let (_d, db) = db_with_chunks(2);
+    let units = plan_extract(&db, "s", "m", S, None).unwrap();
+    let results = units
+        .iter()
+        .map(|unit| ExtractResult {
+            chunk_id: unit.chunk_id,
+            model: unit.model.clone(),
+            provenance_nonce: unit.provenance_nonce.clone().unwrap(),
+            response: "Alice (Person) -[uses]-> GraphRAG (Software)".into(),
+        })
+        .collect::<Vec<_>>();
+    apply_extract(&db, "s", S, &results).unwrap();
+
+    assert_eq!(db.list_relations("s").unwrap().len(), 1);
+    let first = db
+        .get_extraction_provenance("s", &results[0].provenance_nonce)
+        .unwrap()
+        .unwrap();
+    let second = db
+        .get_extraction_provenance("s", &results[1].provenance_nonce)
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.relations.len(), 1);
+    assert_eq!(second.relations.len(), 1);
+    assert_eq!(first.relations[0].id, second.relations[0].id);
 }
 
 #[test]
 fn apply_accepts_partial_and_out_of_order_results() {
     let (_d, db) = db_with_chunks(4);
     let units = plan_extract(&db, "s", "m", S, None).unwrap();
-    let mk = |c: i64| ExtractResult {
-        chunk_id: c,
+    let mk = |u: &WorkUnit| ExtractResult {
+        chunk_id: u.chunk_id,
         model: "m".into(),
+        provenance_nonce: u.provenance_nonce.clone().unwrap(),
         response: "A (Person) -[knows]-> B (Person)".into(),
     };
     // only units 3 and 1, reversed — a crashed/partial executor run
-    apply_extract(&db, "s", S, &[mk(units[3].chunk_id), mk(units[1].chunk_id)]).unwrap();
+    apply_extract(&db, "s", S, &[mk(&units[3]), mk(&units[1])]).unwrap();
     let pending: Vec<_> = plan_extract(&db, "s", "m", S, None)
         .unwrap()
         .iter()
@@ -227,6 +600,7 @@ fn apply_tolerates_malformed_response() {
         &[ExtractResult {
             chunk_id: u.chunk_id,
             model: "m".into(),
+            provenance_nonce: u.provenance_nonce.clone().unwrap(),
             response: "%%% not a triple at all %%%".into(),
         }],
     )
@@ -260,6 +634,7 @@ fn db_with_community() -> (TempDir, Database, i64) {
         &[ExtractResult {
             chunk_id: units[0].chunk_id,
             model: "m".into(),
+            provenance_nonce: units[0].provenance_nonce.clone().unwrap(),
             response: "Alice (Person) -[uses]-> GraphRAG (Software)".into(),
         }],
     )
@@ -441,6 +816,7 @@ fn parent_prompt_substitutes_child_summaries_for_entities() {
         &[ExtractResult {
             chunk_id: units[0].chunk_id,
             model: "m".into(),
+            provenance_nonce: units[0].provenance_nonce.clone().unwrap(),
             response: "Alice (Person) -[uses]-> GraphRAG (Software)".into(),
         }],
     )
@@ -514,6 +890,7 @@ fn status_detects_entities_that_appeared_after_community_detection() {
         &[ExtractResult {
             chunk_id: units[0].chunk_id,
             model: "m".into(),
+            provenance_nonce: units[0].provenance_nonce.clone().unwrap(),
             response: "Alice (Person) -[uses]-> GraphRAG (Software)".into(),
         }],
     )
@@ -539,6 +916,7 @@ fn status_detects_entities_that_appeared_after_community_detection() {
         &[ExtractResult {
             chunk_id: units[1].chunk_id,
             model: "m".into(),
+            provenance_nonce: units[1].provenance_nonce.clone().unwrap(),
             response: "Bruce (Person) -[reviews]-> leit (Software)".into(),
         }],
     )
@@ -723,6 +1101,7 @@ fn plan_embed_lists_entities_without_vectors() {
         &[ExtractResult {
             chunk_id: u[0].chunk_id,
             model: "m".into(),
+            provenance_nonce: u[0].provenance_nonce.clone().unwrap(),
             response: "Alice (Person) -[uses]-> GraphRAG (Software)".into(),
         }],
     )
@@ -748,6 +1127,7 @@ fn apply_embed_persists_and_is_terminal() {
         &[ExtractResult {
             chunk_id: u[0].chunk_id,
             model: "m".into(),
+            provenance_nonce: u[0].provenance_nonce.clone().unwrap(),
             response: "Alice (Person) -[uses]-> GraphRAG (Software)".into(),
         }],
     )
@@ -785,6 +1165,7 @@ fn status_reports_embed_as_a_phase_between_extract_and_communities() {
         &[ExtractResult {
             chunk_id: u[0].chunk_id,
             model: "m".into(),
+            provenance_nonce: u[0].provenance_nonce.clone().unwrap(),
             response: "Alice (Person) -[uses]-> GraphRAG (Software)".into(),
         }],
     )
@@ -800,5 +1181,34 @@ fn status_reports_embed_as_a_phase_between_extract_and_communities() {
         e.guidance.contains("embed"),
         "guidance names the command: {}",
         e.guidance
+    );
+}
+
+#[hegel::test]
+fn provenance_nonce_is_stable_and_binds_every_planned_dimension(tc: TestCase) {
+    let store = tc.draw(gs::text().max_size(64));
+    let model = tc.draw(gs::text().max_size(64));
+    let content = tc.draw(gs::text().max_size(512));
+    let chunk_id = tc.draw(gs::integers::<i64>());
+    let nonce = extraction_provenance_nonce(&store, chunk_id, &model, &content);
+    assert_eq!(
+        nonce,
+        extraction_provenance_nonce(&store, chunk_id, &model, &content)
+    );
+    assert_ne!(
+        nonce,
+        extraction_provenance_nonce(&(store.clone() + "\0"), chunk_id, &model, &content)
+    );
+    assert_ne!(
+        nonce,
+        extraction_provenance_nonce(&store, chunk_id.wrapping_add(1), &model, &content)
+    );
+    assert_ne!(
+        nonce,
+        extraction_provenance_nonce(&store, chunk_id, &(model.clone() + "\0"), &content)
+    );
+    assert_ne!(
+        nonce,
+        extraction_provenance_nonce(&store, chunk_id, &model, &(content + "\0"))
     );
 }

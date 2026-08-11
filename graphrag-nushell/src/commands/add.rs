@@ -1,7 +1,9 @@
 use crate::GraphRagPlugin;
 use crate::error_ext::GraphRagErrorExt;
-use graphrag_core::Database;
-use graphrag_core::GraphRagError;
+use graphrag_core::{
+    Database, EntityInput, ExtractResult, GraphRagError, apply_extracted_entities,
+    extraction_provenance_nonce,
+};
 use nu_plugin::{EngineInterface, EvaluatedCall, PluginCommand};
 use nu_protocol::{Category, PipelineData, Record, Signature, SyntaxShape, Type, Value};
 
@@ -51,29 +53,22 @@ impl PluginCommand for GraphRagAdd {
         // Process input
         let result = match input {
             PipelineData::Value(Value::Record { val, .. }, _) => {
-                let chunk_id = process_record(&db, &store_name, store.dim, &val, span)
-                    .map_err(|e| e.into_labeled_error(span))?;
-
-                Value::record(
-                    nu_protocol::record! {
-                        "chunk_id" => Value::int(chunk_id, span),
-                        "store" => Value::string(&store_name, span),
-                    },
-                    span,
-                )
+                let (chunk_id, provenance_nonce) =
+                    process_record(&db, &store_name, store.dim, &val, span)
+                        .map_err(|e| e.into_labeled_error(span))?;
+                add_result_value(&store_name, chunk_id, provenance_nonce, span)
             }
             PipelineData::Value(Value::List { vals, .. }, _) => {
                 let mut results = Vec::new();
                 for val in vals {
                     if let Value::Record { val: record, .. } = val {
-                        let chunk_id = process_record(&db, &store_name, store.dim, &record, span)
-                            .map_err(|e| e.into_labeled_error(span))?;
-
-                        results.push(Value::record(
-                            nu_protocol::record! {
-                                "chunk_id" => Value::int(chunk_id, span),
-                                "store" => Value::string(&store_name, span),
-                            },
+                        let (chunk_id, provenance_nonce) =
+                            process_record(&db, &store_name, store.dim, &record, span)
+                                .map_err(|e| e.into_labeled_error(span))?;
+                        results.push(add_result_value(
+                            &store_name,
+                            chunk_id,
+                            provenance_nonce,
                             span,
                         ));
                     }
@@ -91,13 +86,28 @@ impl PluginCommand for GraphRagAdd {
     }
 }
 
+fn add_result_value(
+    store_name: &str,
+    chunk_id: i64,
+    provenance_nonce: Option<String>,
+    span: nu_protocol::Span,
+) -> Value {
+    let mut record = Record::new();
+    record.push("chunk_id", Value::int(chunk_id, span));
+    record.push("store", Value::string(store_name, span));
+    if let Some(nonce) = provenance_nonce {
+        record.push("provenance_nonce", Value::string(nonce, span));
+    }
+    Value::record(record, span)
+}
+
 fn process_record(
     db: &Database,
     store_name: &str,
     expected_dim: usize,
     record: &Record,
     _span: nu_protocol::Span,
-) -> Result<i64, GraphRagError> {
+) -> Result<(i64, Option<String>), GraphRagError> {
     // Extract content (required)
     let content = record
         .get("content")
@@ -141,66 +151,63 @@ fn process_record(
     // Store the canonical embedding
     db.set_chunk_embedding(chunk_id, &embedding)?;
 
-    // Process entities if provided
-    if let Some(Value::List { vals, .. }) = record.get("entities") {
-        for entity_val in vals {
-            if let Value::Record {
-                val: entity_record, ..
-            } = entity_val
-            {
-                process_entity(db, store_name, chunk_id, entity_record)?;
-            }
-        }
-    }
+    // Structured entity input is an extraction result and therefore must use
+    // the same atomic checkpoint/provenance path as CLI and MCP extraction.
+    let provenance_nonce = if let Some(Value::List { vals, .. }) = record.get("entities") {
+        let triples = vals
+            .iter()
+            .filter_map(|value| match value {
+                Value::Record { val, .. } => Some(parse_entity(val)),
+                _ => None,
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let model = record
+            .get("model")
+            .and_then(|value| value.as_str().ok())
+            .unwrap_or("nushell-input");
+        let nonce = extraction_provenance_nonce(store_name, chunk_id, model, content);
+        let result = ExtractResult {
+            chunk_id,
+            model: model.into(),
+            provenance_nonce: nonce.clone(),
+            response: serde_json::to_string(&triples).unwrap_or_default(),
+        };
+        apply_extracted_entities(db, store_name, &result, &triples)?;
+        Some(nonce)
+    } else {
+        None
+    };
 
-    Ok(chunk_id)
+    Ok((chunk_id, provenance_nonce))
 }
 
-fn process_entity(
-    db: &Database,
-    store_name: &str,
-    chunk_id: i64,
-    record: &Record,
-) -> Result<(), GraphRagError> {
-    // Extract entity fields
+fn parse_entity(record: &Record) -> Result<EntityInput, GraphRagError> {
     let head = record
         .get("head")
-        .and_then(|v| v.as_str().ok())
+        .and_then(|value| value.as_str().ok())
         .ok_or_else(|| GraphRagError::MissingField("head".to_string()))?;
-
     let relation = record
         .get("relation")
-        .and_then(|v| v.as_str().ok())
+        .and_then(|value| value.as_str().ok())
         .ok_or_else(|| GraphRagError::MissingField("relation".to_string()))?;
-
     let tail = record
         .get("tail")
-        .and_then(|v| v.as_str().ok())
+        .and_then(|value| value.as_str().ok())
         .ok_or_else(|| GraphRagError::MissingField("tail".to_string()))?;
-
-    let head_type = record.get("head_type").and_then(|v| v.as_str().ok());
-    let tail_type = record.get("tail_type").and_then(|v| v.as_str().ok());
-
-    let properties = record
-        .get("properties")
-        .map(|v| serde_json::to_string(v).unwrap_or_default());
-
-    // Get or create entities
-    let head_id = db.get_or_create_entity(store_name, head, head_type, None)?;
-    let tail_id = db.get_or_create_entity(store_name, tail, tail_type, None)?;
-
-    // Create relation
-    db.add_relation(
-        store_name,
-        head_id,
-        tail_id,
-        relation,
-        properties.as_deref(),
-    )?;
-
-    // Link entities to chunk
-    db.link_chunk_entity(chunk_id, head_id)?;
-    db.link_chunk_entity(chunk_id, tail_id)?;
-
-    Ok(())
+    Ok(EntityInput {
+        head: head.into(),
+        head_type: record
+            .get("head_type")
+            .and_then(|value| value.as_str().ok())
+            .map(str::to_owned),
+        relation: relation.into(),
+        tail: tail.into(),
+        tail_type: record
+            .get("tail_type")
+            .and_then(|value| value.as_str().ok())
+            .map(str::to_owned),
+        properties: record
+            .get("properties")
+            .and_then(|value| serde_json::to_value(value).ok()),
+    })
 }

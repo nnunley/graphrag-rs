@@ -75,7 +75,9 @@ pub use capsule::{
     Freshness, NextSegment, OpenThread, ProjectCapsuleV1, ProjectIdentity, VerifiedFact,
     capsule_uri,
 };
-pub use db::{Chunk, CommunityRecord, Database, Entity, EntityInput, Relation, Store};
+pub use db::{
+    Chunk, CommunityRecord, Database, Entity, EntityInput, ExtractionProvenance, Relation, Store,
+};
 pub use entity_types::{
     CANONICAL_ENTITY_TYPES, STANDARD_TYPE_SYNONYMS, canonical_entity_types,
     load_standard_type_synonyms,
@@ -84,7 +86,8 @@ pub use error::GraphRagError;
 pub use lexical::LexicalIndex;
 pub use mr::{
     ExtractPrompt, ExtractResult, ExtractionStrategy, HierarchyConfig, HierarchyReport,
-    PhaseStatus, PipelineStatus, WorkUnit, apply_extract, plan_extract,
+    PhaseStatus, PipelineStatus, WorkUnit, apply_extract, apply_extracted_entities,
+    extraction_provenance_nonce, plan_extract,
 };
 pub use vector_source::{BruteForceVectorSource, VectorCandidate, VectorCandidateSource};
 

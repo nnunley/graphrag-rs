@@ -5,8 +5,9 @@
 
 use graphrag_core::{
     BruteForceVectorSource, ChunkerConfig, CodeChunkerConfig, CodeLanguage, Database, Embedder,
-    EmbedderConfig, EmbedderModel, LexicalIndex, VectorCandidate, VectorCandidateSource,
-    chunk_code, chunk_text as core_chunk_text, default_embedder_cache_dir, leit_fusion,
+    EmbedderConfig, EmbedderModel, EntityInput, ExtractResult, LexicalIndex, VectorCandidate,
+    VectorCandidateSource, apply_extracted_entities, chunk_code, chunk_text as core_chunk_text,
+    default_embedder_cache_dir, extraction_provenance_nonce, leit_fusion,
 };
 use graphrag_llm::{
     EntityTriple, continuation_extraction_prompt, entity_extraction_prompt,
@@ -1349,30 +1350,37 @@ impl McpServer {
             return;
         }
 
-        // Process entities
-        let mut entity_count = 0;
-        for entity in &entities {
-            if let Ok(head_id) = db.get_or_create_entity(
-                &store_name,
-                &entity.head,
-                entity.head_type.as_deref(),
-                None,
-            ) && let Ok(tail_id) = db.get_or_create_entity(
-                &store_name,
-                &entity.tail,
-                entity.tail_type.as_deref(),
-                None,
-            ) {
-                // Add relation
-                let _ = db.add_relation(&store_name, head_id, tail_id, &entity.relation, None);
-
-                // Link to chunk
-                let _ = db.link_chunk_entity(chunk_id, head_id);
-                let _ = db.link_chunk_entity(chunk_id, tail_id);
-
-                entity_count += 1;
+        // Commit the checkpoint and exact graph-object involvement together.
+        // MCP sampling does not expose the selected client model, so record the
+        // stable execution surface rather than inventing a model identity.
+        let model = "mcp-sampling";
+        let provenance_nonce =
+            extraction_provenance_nonce(&store_name, chunk_id, model, &chunk_content);
+        let response = serde_json::to_string(&entities).unwrap_or_default();
+        let triples = entities
+            .iter()
+            .map(|entity| EntityInput {
+                head: entity.head.clone(),
+                head_type: entity.head_type.clone(),
+                relation: entity.relation.clone(),
+                tail: entity.tail.clone(),
+                tail_type: entity.tail_type.clone(),
+                properties: None,
+            })
+            .collect::<Vec<_>>();
+        let result = ExtractResult {
+            chunk_id,
+            model: model.into(),
+            provenance_nonce,
+            response,
+        };
+        let entity_count = match apply_extracted_entities(&db, &store_name, &result, &triples) {
+            Ok(count) => count,
+            Err(e) => {
+                self.send_final_response(self.tool_error(original_id, e.to_string()), stdout);
+                return;
             }
-        }
+        };
 
         let new_chunks_added = chunks_added + 1;
         let new_entities_extracted = entities_extracted + entity_count;

@@ -244,6 +244,7 @@ impl Store {
                 d.set_item("system", u.system)?;
                 d.set_item("user", u.user)?;
                 d.set_item("format", u.format.map(|f| f.to_string()))?;
+                d.set_item("provenance_nonce", u.provenance_nonce)?;
                 Ok(d)
             })
             .collect()
@@ -266,9 +267,16 @@ impl Store {
                         .get_item("chunk_id")?
                         .ok_or_else(|| PyValueError::new_err("result missing chunk_id"))?
                         .extract()?;
+                    let provenance_nonce = get(d, "provenance_nonce")?;
+                    if provenance_nonce.trim().is_empty() {
+                        return Err(PyValueError::new_err(
+                            "extract result missing provenance_nonce",
+                        ));
+                    }
                     rs.push(ExtractResult {
                         chunk_id,
                         model: get(d, "model")?,
+                        provenance_nonce,
                         response: get(d, "response")?,
                     });
                 }
@@ -295,6 +303,59 @@ impl Store {
                 "unknown stage {other:?} (supported: extract, summarize)"
             ))),
         }
+    }
+
+    /// Resolve an extraction nonce to its exact entities and relations.
+    fn extraction<'p>(
+        &self,
+        py: Python<'p>,
+        provenance_nonce: &str,
+    ) -> PyResult<Option<Bound<'p, PyDict>>> {
+        let db = self.db.lock().map_err(|e| err(e.to_string()))?;
+        let Some(provenance) = db
+            .get_extraction_provenance(&self.name, provenance_nonce)
+            .map_err(err)?
+        else {
+            return Ok(None);
+        };
+        let out = PyDict::new(py);
+        out.set_item("provenance_nonce", provenance.nonce)?;
+        out.set_item("chunk_id", provenance.chunk_id)?;
+        out.set_item("model", provenance.model)?;
+        out.set_item("triple_count", provenance.triple_count)?;
+        out.set_item("response_sha256", provenance.response_sha256)?;
+        out.set_item("extracted_at", provenance.extracted_at)?;
+
+        let entities = provenance
+            .entities
+            .into_iter()
+            .map(|entity| {
+                let item = PyDict::new(py);
+                item.set_item("id", entity.id)?;
+                item.set_item("name", entity.name)?;
+                item.set_item("entity_type", entity.entity_type)?;
+                item.set_item("properties", entity.properties)?;
+                Ok(item)
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        out.set_item("entities", entities)?;
+
+        let relations = provenance
+            .relations
+            .into_iter()
+            .map(|relation| {
+                let item = PyDict::new(py);
+                item.set_item("id", relation.id)?;
+                item.set_item("head_id", relation.head_id)?;
+                item.set_item("tail_id", relation.tail_id)?;
+                item.set_item("relation", relation.relation)?;
+                item.set_item("canonical_relation", relation.canonical_relation)?;
+                item.set_item("properties", relation.properties)?;
+                Ok(item)
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        out.set_item("relations", relations)?;
+        Ok(Some(out))
     }
 
     /// Communities with their summaries.

@@ -66,6 +66,12 @@ fn plan_emits_one_jsonl_work_unit_per_pending_chunk() {
             "prompt is populated"
         );
         assert!(u["unit_id"].as_str().unwrap().starts_with("extract:chunk:"));
+        assert!(
+            u["provenance_nonce"]
+                .as_str()
+                .unwrap()
+                .starts_with("extract:sha256:")
+        );
     }
 }
 
@@ -110,9 +116,10 @@ fn apply_reads_jsonl_from_stdin_and_checkpoints() {
         .clone();
     let units = lines(&out);
     let first = units[0]["chunk_id"].as_i64().unwrap();
+    let nonce = units[0]["provenance_nonce"].as_str().unwrap();
 
     let results = format!(
-        r#"{{"chunk_id":{first},"model":"m","response":"Alice (Person) -[uses]-> GraphRAG (Software)"}}"#
+        r#"{{"chunk_id":{first},"model":"m","provenance_nonce":"{nonce}","response":"Alice (Person) -[uses]-> GraphRAG (Software)"}}"#
     );
     cli(&dir)
         .args(["apply", "extract", "--store", "conversations"])
@@ -142,6 +149,48 @@ fn apply_reads_jsonl_from_stdin_and_checkpoints() {
 }
 
 #[test]
+fn provenance_command_resolves_exact_graph_objects() {
+    let dir = seeded(1);
+    let out = cli(&dir)
+        .args([
+            "plan",
+            "extract",
+            "--store",
+            "conversations",
+            "--model",
+            "m",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let unit = lines(&out).remove(0);
+    let id = unit["chunk_id"].as_i64().unwrap();
+    let nonce = unit["provenance_nonce"].as_str().unwrap();
+    let result = format!(
+        r#"{{"chunk_id":{id},"model":"m","provenance_nonce":"{nonce}","response":"Alice (Person) -[uses]-> GraphRAG (Software)"}}"#
+    );
+    cli(&dir)
+        .args(["apply", "extract", "--store", "conversations"])
+        .write_stdin(result)
+        .assert()
+        .success();
+
+    let resolved = cli(&dir)
+        .args(["provenance", nonce, "--store", "conversations"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let value: Value = serde_json::from_slice(&resolved).unwrap();
+    assert_eq!(value["provenance_nonce"], nonce);
+    assert_eq!(value["entities"].as_array().unwrap().len(), 2);
+    assert_eq!(value["relations"].as_array().unwrap().len(), 1);
+}
+
+#[test]
 fn plan_apply_roundtrip_drains_to_empty() {
     let dir = seeded(4);
     for _ in 0..4 {
@@ -166,8 +215,9 @@ fn plan_apply_roundtrip_drains_to_empty() {
             break;
         }
         let id = units[0]["chunk_id"].as_i64().unwrap();
+        let nonce = units[0]["provenance_nonce"].as_str().unwrap();
         let r = format!(
-            r#"{{"chunk_id":{id},"model":"m","response":"A (Person) -[knows]-> B (Person)"}}"#
+            r#"{{"chunk_id":{id},"model":"m","provenance_nonce":"{nonce}","response":"A (Person) -[knows]-> B (Person)"}}"#
         );
         cli(&dir)
             .args(["apply", "extract", "--store", "conversations"])
@@ -209,9 +259,12 @@ fn apply_tolerates_blank_lines_and_malformed_response_text() {
         .get_output()
         .stdout
         .clone();
-    let id = lines(&out)[0]["chunk_id"].as_i64().unwrap();
-    let payload =
-        format!("\n{{\"chunk_id\":{id},\"model\":\"m\",\"response\":\"%%% junk %%%\"}}\n\n");
+    let unit = &lines(&out)[0];
+    let id = unit["chunk_id"].as_i64().unwrap();
+    let nonce = unit["provenance_nonce"].as_str().unwrap();
+    let payload = format!(
+        "\n{{\"chunk_id\":{id},\"model\":\"m\",\"provenance_nonce\":\"{nonce}\",\"response\":\"%%% junk %%%\"}}\n\n"
+    );
     cli(&dir)
         .args(["apply", "extract", "--store", "conversations"])
         .write_stdin(payload)
@@ -232,6 +285,17 @@ fn apply_tolerates_blank_lines_and_malformed_response_text() {
         .stdout
         .clone();
     assert!(lines(&out2).is_empty(), "malformed reply still checkpoints");
+}
+
+#[test]
+fn apply_rejects_result_without_provenance_nonce() {
+    let dir = seeded(1);
+    cli(&dir)
+        .args(["apply", "extract", "--store", "conversations"])
+        .write_stdin(r#"{"chunk_id":1,"model":"m","response":"A -[knows]-> B"}"#)
+        .assert()
+        .failure()
+        .stderr(contains("provenance_nonce"));
 }
 
 #[test]

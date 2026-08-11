@@ -1,5 +1,5 @@
 use crate::error::GraphRagError;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -56,6 +56,23 @@ pub struct EntityInput {
     pub properties: Option<serde_json::Value>,
 }
 
+/// Exact graph objects produced or reused by one extraction result.
+///
+/// `nonce` is the opaque correlation token emitted by `plan_extract` and
+/// required by `apply_extract`. Entities may predate the extraction; the links
+/// record involvement, not object creation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtractionProvenance {
+    pub nonce: String,
+    pub chunk_id: i64,
+    pub model: String,
+    pub triple_count: usize,
+    pub response_sha256: String,
+    pub extracted_at: String,
+    pub entities: Vec<Entity>,
+    pub relations: Vec<Relation>,
+}
+
 /// A candidate pair for entity merging:
 /// `(entity1_id, entity1_name, entity2_id, entity2_name, cosine_similarity)`.
 pub type MergeCandidate = (i64, String, i64, String, f32);
@@ -92,8 +109,9 @@ impl Database {
 
     /// Run schema migrations for existing databases
     fn migrate_schema(&self) -> Result<(), GraphRagError> {
+        let tx = self.conn.unchecked_transaction()?;
         // Check if communities table has parent_id column
-        let has_parent_id: bool = self.conn.query_row(
+        let has_parent_id: bool = tx.query_row(
             "SELECT COUNT(*) > 0 FROM pragma_table_info('communities') WHERE name = 'parent_id'",
             [],
             |row| row.get(0),
@@ -101,19 +119,19 @@ impl Database {
 
         if !has_parent_id {
             // Add parent_id column to existing communities table
-            self.conn.execute(
+            tx.execute(
                 "ALTER TABLE communities ADD COLUMN parent_id INTEGER REFERENCES communities(id) ON DELETE CASCADE",
                 [],
             )?;
             // Create index
-            self.conn.execute(
+            tx.execute(
                 "CREATE INDEX IF NOT EXISTS idx_communities_parent ON communities(parent_id)",
                 [],
             )?;
         }
 
         // Check if relations table has canonical_relation column
-        let has_canonical: bool = self.conn.query_row(
+        let has_canonical: bool = tx.query_row(
             "SELECT COUNT(*) > 0 FROM pragma_table_info('relations') WHERE name = 'canonical_relation'",
             [],
             |row| row.get(0),
@@ -121,19 +139,19 @@ impl Database {
 
         if !has_canonical {
             // Add canonical_relation column to existing relations table
-            self.conn.execute(
+            tx.execute(
                 "ALTER TABLE relations ADD COLUMN canonical_relation TEXT",
                 [],
             )?;
             // Create index
-            self.conn.execute(
+            tx.execute(
                 "CREATE INDEX IF NOT EXISTS idx_relations_canonical ON relations(canonical_relation)",
                 [],
             )?;
         }
 
         // Create relation_synonyms table if it doesn't exist (for older DBs)
-        self.conn.execute(
+        tx.execute(
             "CREATE TABLE IF NOT EXISTS relation_synonyms (
                 raw_relation TEXT PRIMARY KEY,
                 canonical_relation TEXT NOT NULL
@@ -142,30 +160,30 @@ impl Database {
         )?;
 
         // Create indexes (safe for both new and existing DBs)
-        self.conn.execute(
+        tx.execute(
             "CREATE INDEX IF NOT EXISTS idx_relations_canonical ON relations(canonical_relation)",
             [],
         )?;
-        self.conn.execute(
+        tx.execute(
             "CREATE INDEX IF NOT EXISTS idx_synonyms_canonical ON relation_synonyms(canonical_relation)",
             [],
         )?;
 
         // Create entity_type_synonyms table if it doesn't exist (for older DBs)
-        self.conn.execute(
+        tx.execute(
             "CREATE TABLE IF NOT EXISTS entity_type_synonyms (
                 raw_type TEXT PRIMARY KEY,
                 canonical_type TEXT NOT NULL
             )",
             [],
         )?;
-        self.conn.execute(
+        tx.execute(
             "CREATE INDEX IF NOT EXISTS idx_type_synonyms_canonical ON entity_type_synonyms(canonical_type)",
             [],
         )?;
 
         // Create entity_embeddings table if it doesn't exist
-        self.conn.execute(
+        tx.execute(
             "CREATE TABLE IF NOT EXISTS entity_embeddings (
                 entity_id INTEGER PRIMARY KEY REFERENCES entities(id) ON DELETE CASCADE,
                 embedding BLOB NOT NULL
@@ -174,7 +192,7 @@ impl Database {
         )?;
 
         // Create entity_merges table if it doesn't exist
-        self.conn.execute(
+        tx.execute(
             "CREATE TABLE IF NOT EXISTS entity_merges (
                 id INTEGER PRIMARY KEY,
                 target_entity_id INTEGER NOT NULL REFERENCES entities(id),
@@ -184,6 +202,56 @@ impl Database {
             [],
         )?;
 
+        let has_provenance_nonce: bool = tx
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('extractions') WHERE name = 'provenance_nonce'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        if !has_provenance_nonce {
+            // Legacy checkpoints remain readable but intentionally have no
+            // fabricated provenance. Every newly applied result requires one.
+            tx.execute(
+                "ALTER TABLE extractions ADD COLUMN provenance_nonce TEXT",
+                [],
+            )?;
+        }
+        let has_response_sha256: bool = tx
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('extractions') WHERE name = 'response_sha256'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        if !has_response_sha256 {
+            tx.execute(
+                "ALTER TABLE extractions ADD COLUMN response_sha256 TEXT",
+                [],
+            )?;
+        }
+        tx.execute_batch(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_extractions_provenance_nonce
+                 ON extractions(provenance_nonce);
+             CREATE TABLE IF NOT EXISTS extraction_entities (
+                 provenance_nonce TEXT NOT NULL REFERENCES extractions(provenance_nonce)
+                     ON UPDATE CASCADE ON DELETE CASCADE,
+                 entity_id INTEGER NOT NULL REFERENCES entities(id),
+                 PRIMARY KEY (provenance_nonce, entity_id)
+             );
+             CREATE TABLE IF NOT EXISTS extraction_relations (
+                 provenance_nonce TEXT NOT NULL REFERENCES extractions(provenance_nonce)
+                     ON UPDATE CASCADE ON DELETE CASCADE,
+                 relation_id INTEGER NOT NULL REFERENCES relations(id),
+                 PRIMARY KEY (provenance_nonce, relation_id)
+             );
+             CREATE INDEX IF NOT EXISTS idx_extraction_entities_entity
+                 ON extraction_entities(entity_id);
+             CREATE INDEX IF NOT EXISTS idx_extraction_relations_relation
+                 ON extraction_relations(relation_id);",
+        )?;
+
+        tx.commit()?;
         Ok(())
     }
 
@@ -208,7 +276,9 @@ impl Database {
                 chunk_id INTEGER PRIMARY KEY REFERENCES chunks(id) ON DELETE CASCADE,
                 model TEXT NOT NULL,
                 triple_count INTEGER NOT NULL,
-                extracted_at TEXT NOT NULL
+                extracted_at TEXT NOT NULL,
+                provenance_nonce TEXT UNIQUE,
+                response_sha256 TEXT
             );
 
             CREATE TABLE IF NOT EXISTS capsules (
@@ -696,6 +766,117 @@ impl Database {
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(entities)
+    }
+
+    /// List complete extraction provenance for a store in chunk order.
+    /// Legacy checkpoints are omitted because exact involvement is unknowable.
+    pub fn list_extraction_provenance(
+        &self,
+        store: &str,
+    ) -> Result<Vec<ExtractionProvenance>, GraphRagError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT x.provenance_nonce
+             FROM extractions x
+             JOIN chunks c ON c.id = x.chunk_id
+             WHERE c.store = ?1 AND x.provenance_nonce IS NOT NULL
+             ORDER BY x.chunk_id",
+        )?;
+        let nonces = stmt
+            .query_map(params![store], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        nonces
+            .iter()
+            .map(|nonce| {
+                self.get_extraction_provenance(store, nonce)?
+                    .ok_or_else(|| {
+                        GraphRagError::Other(format!(
+                            "complete extraction provenance {nonce:?} disappeared during listing"
+                        ))
+                    })
+            })
+            .collect()
+    }
+
+    /// Resolve one extraction nonce to the exact entities and edges involved.
+    /// Reused global objects are included; legacy checkpoints return `None`.
+    pub fn get_extraction_provenance(
+        &self,
+        store: &str,
+        nonce: &str,
+    ) -> Result<Option<ExtractionProvenance>, GraphRagError> {
+        let checkpoint = self
+            .conn
+            .query_row(
+                "SELECT x.chunk_id, x.model, x.triple_count, x.response_sha256, x.extracted_at
+                 FROM extractions x
+                 JOIN chunks c ON c.id = x.chunk_id
+                 WHERE x.provenance_nonce = ?1 AND c.store = ?2",
+                params![nonce, store],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, usize>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((chunk_id, model, triple_count, response_sha256, extracted_at)) = checkpoint
+        else {
+            return Ok(None);
+        };
+
+        let mut entity_stmt = self.conn.prepare(
+            "SELECT e.id, e.store, e.name, e.entity_type, e.properties
+             FROM entities e
+             JOIN extraction_entities p ON p.entity_id = e.id
+             WHERE p.provenance_nonce = ?1 ORDER BY e.id",
+        )?;
+        let entities = entity_stmt
+            .query_map(params![nonce], |row| {
+                Ok(Entity {
+                    id: row.get(0)?,
+                    store: row.get(1)?,
+                    name: row.get(2)?,
+                    entity_type: row.get(3)?,
+                    properties: row.get(4)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut relation_stmt = self.conn.prepare(
+            "SELECT r.id, r.store, r.head_id, r.tail_id, r.relation,
+                    r.canonical_relation, r.properties
+             FROM relations r
+             JOIN extraction_relations p ON p.relation_id = r.id
+             WHERE p.provenance_nonce = ?1 ORDER BY r.id",
+        )?;
+        let relations = relation_stmt
+            .query_map(params![nonce], |row| {
+                Ok(Relation {
+                    id: row.get(0)?,
+                    store: row.get(1)?,
+                    head_id: row.get(2)?,
+                    tail_id: row.get(3)?,
+                    relation: row.get(4)?,
+                    canonical_relation: row.get(5)?,
+                    properties: row.get(6)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(Some(ExtractionProvenance {
+            nonce: nonce.to_string(),
+            chunk_id,
+            model,
+            triple_count,
+            response_sha256,
+            extracted_at,
+            entities,
+            relations,
+        }))
     }
 
     /// Get all relations in a store (for community detection)
@@ -1211,6 +1392,20 @@ impl Database {
         // Then update remaining links
         self.conn.execute(
             "UPDATE chunk_entities SET entity_id = ?1 WHERE entity_id = ?2",
+            params![target_id, source_id],
+        )?;
+
+        // Preserve exact extraction involvement across entity resolution.
+        self.conn.execute(
+            "DELETE FROM extraction_entities
+             WHERE entity_id = ?1
+             AND provenance_nonce IN (
+                 SELECT provenance_nonce FROM extraction_entities WHERE entity_id = ?2
+             )",
+            params![source_id, target_id],
+        )?;
+        self.conn.execute(
+            "UPDATE extraction_entities SET entity_id = ?1 WHERE entity_id = ?2",
             params![target_id, source_id],
         )?;
 
