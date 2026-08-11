@@ -48,6 +48,7 @@ pub mod error;
 pub mod hnsw;
 pub mod leiden;
 pub mod lexical;
+pub mod query;
 pub mod synonyms;
 
 #[cfg(feature = "embeddings")]
