@@ -51,6 +51,7 @@ pub mod export;
 pub mod leiden;
 pub mod lexical;
 pub mod mr;
+pub mod query;
 pub mod synonyms;
 pub mod vector_source;
 

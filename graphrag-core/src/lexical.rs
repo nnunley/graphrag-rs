@@ -84,51 +84,27 @@ impl LexicalIndex {
 
     /// Run a BM25 query, return (chunk_id, score) pairs ranked high-first.
     ///
-    /// Natural-language queries are auto-OR'd. leit's query parser defaults
-    /// to AND across whitespace-separated terms; for brain-style "what do
-    /// I know about X" queries that's the wrong default — one unrelated
-    /// term ("non-primary worktree" against a doc that only says "worktree")
-    /// kills the entire match. We split on whitespace and join with " OR "
-    /// unless the user already supplied explicit operators (OR/AND/parens/
-    /// field-qualifiers), in which case the query is passed through verbatim.
+    /// The query string goes through the total front-end in [`crate::query`]:
+    /// plain prose becomes an OR of terms (brain-style recall default),
+    /// quoted text becomes a phrase, uppercase OR/AND/NOT and balanced parens
+    /// become boolean nodes, and `content:value` is honored as a field
+    /// qualifier. The resulting typed program is planned directly — leit's
+    /// textual parser is never in this path, so operator punctuation inside
+    /// prose cannot fail the search by construction.
     pub fn search(&self, query: &str, top: usize) -> Result<Vec<(i64, f32)>, GraphRagError> {
-        let effective = if query_has_explicit_operators(query) {
-            query.to_string()
-        } else {
-            query.split_whitespace().collect::<Vec<_>>().join(" OR ")
+        let Some(program) = crate::query::parse(query, &["content"]) else {
+            // No searchable tokens (empty / pure punctuation).
+            return Ok(Vec::new());
         };
         let mut workspace = ExecutionWorkspace::new();
         let hits = workspace
-            .search(
-                &self.inner,
-                &effective,
-                top,
-                SearchScorer::bm25(),
-                &NoFilter,
-            )
+            .search_program(&self.inner, &program, top, SearchScorer::bm25(), &NoFilter)
             .map_err(|e| GraphRagError::Other(format!("leit search: {e}")))?;
         Ok(hits
             .into_iter()
             .map(|h| (i64::from(h.id), f32::from(h.score)))
             .collect())
     }
-}
-
-/// Detect whether the query already uses leit's operator syntax.
-/// We treat as "explicit" if any of OR/AND/parens/`field:` appear as
-/// recognisable tokens. Conservative — false positives just mean the user
-/// gets verbatim parsing, which is what they typed.
-fn query_has_explicit_operators(query: &str) -> bool {
-    if query.contains('(') || query.contains(')') {
-        return true;
-    }
-    if query.contains(':') {
-        // field:value qualifier
-        return true;
-    }
-    query
-        .split_whitespace()
-        .any(|tok| tok == "OR" || tok == "AND" || tok == "NOT")
 }
 
 #[cfg(test)]
@@ -151,6 +127,56 @@ mod tests {
     fn empty_corpus_returns_none() {
         let result = LexicalIndex::build_from_chunks(&[]).unwrap();
         assert!(result.is_none());
+    }
+
+
+    #[test]
+    fn prose_with_colon_falls_back_instead_of_failing() {
+        // Regression: a colon in natural prose ("push authority: workers")
+        // used to route to verbatim operator mode, read as a field qualifier,
+        // and fail the whole search. The typed front-end demotes unknown
+        // qualifiers to plain terms, so this can no longer fail.
+        let corpus = vec![
+            chunk(1, "push authority workers prepare commits locally"),
+            chunk(2, "rust ownership semantics for vector buffers"),
+        ];
+        let index = LexicalIndex::build_from_chunks(&corpus).unwrap().unwrap();
+        let hits = index
+            .search("push authority: workers prepare commits", 5)
+            .unwrap();
+        assert!(!hits.is_empty(), "prose with colon must not hard-fail");
+        assert_eq!(hits[0].0, 1, "should still find the matching doc");
+    }
+
+    #[test]
+    fn explicit_operator_queries_still_parse_verbatim() {
+        let corpus = vec![
+            chunk(1, "jj worktrees respect the safe-push alias"),
+            chunk(2, "git push to remote with explicit branch"),
+        ];
+        let index = LexicalIndex::build_from_chunks(&corpus).unwrap().unwrap();
+        let hits = index.search("push AND branch", 5).unwrap();
+        assert_eq!(hits.len(), 1, "AND must stay verbatim: only doc 2 has both");
+        assert_eq!(hits[0].0, 2);
+    }
+
+    #[test]
+    fn operator_punctuation_never_fails_search() {
+        // Successor to the old sanitize_to_terms test: punctuation-heavy
+        // input must produce a working (possibly empty) result, never an
+        // error. Demotion now happens in the typed front-end (crate::query),
+        // not via a sanitize-and-retry against leit's textual parser.
+        let corpus = vec![
+            chunk(1, "push authority workers prepare commits locally"),
+            chunk(2, "rust ownership semantics"),
+        ];
+        let index = LexicalIndex::build_from_chunks(&corpus).unwrap().unwrap();
+        let hits = index
+            .search("push authority: workers (the subagents) --stat", 5)
+            .unwrap();
+        assert_eq!(hits[0].0, 1, "demoted terms should still match doc 1");
+        let hits = index.search("::(){}[]", 5).unwrap();
+        assert!(hits.is_empty(), "pure punctuation yields no hits, no error");
     }
 
     #[test]
