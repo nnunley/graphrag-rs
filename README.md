@@ -135,6 +135,8 @@ See `ai/memory.nu` for the soft layer implementation that handles:
 ## References
 
 - [Paper-workflow completion roadmap](docs/2026-08-11-paper-workflow-roadmap.md) - Staged plan and falsifiable exit criteria for arXiv:2404.16130v2
+- [Storage architecture decisions](docs/2026-08-12-storage-architecture-decisions.md) - Frozen storage, indexing, embedding, and atomic-cutover choices
+- [Storage architecture TDD roadmap](docs/2026-08-12-storage-architecture-tdd-roadmap.md) - Evidence-gated static storage and dual-backend implementation plan
 - [Microsoft GraphRAG](https://github.com/microsoft/graphrag) - Original GraphRAG implementation
 - [Leiden Algorithm](https://www.nature.com/articles/s41598-019-41695-z) - Community detection paper
 - [usearch](https://github.com/unum-cloud/usearch) - HNSW implementation
