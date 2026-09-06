@@ -129,7 +129,6 @@ mod tests {
         assert!(result.is_none());
     }
 
-
     #[test]
     fn prose_with_colon_falls_back_instead_of_failing() {
         // Regression: a colon in natural prose ("push authority: workers")

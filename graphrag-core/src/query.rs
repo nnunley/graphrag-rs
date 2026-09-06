@@ -95,10 +95,8 @@ fn tokenize(query: &str) -> Option<Vec<Token>> {
                 if !closed {
                     unterminated_quote = true;
                 }
-                let terms: Vec<String> = inner
-                    .split_whitespace()
-                    .map(ToString::to_string)
-                    .collect();
+                let terms: Vec<String> =
+                    inner.split_whitespace().map(ToString::to_string).collect();
                 if closed && !terms.is_empty() {
                     tokens.push(Token::Phrase(terms));
                 } else {
@@ -119,7 +117,11 @@ fn tokenize(query: &str) -> Option<Vec<Token>> {
         tokens.push(Token::RParen);
     }
 
-    if tokens.is_empty() { None } else { Some(tokens) }
+    if tokens.is_empty() {
+        None
+    } else {
+        Some(tokens)
+    }
 }
 
 /// Structured-parse failure. Carries no detail: any failure routes to the
@@ -493,8 +495,7 @@ mod tests {
     fn pseudo_random_punctuation_soup_never_panics() {
         // Deterministic pseudo-random strings over an operator-heavy
         // alphabet: property-style totality check without a proptest dep.
-        let alphabet: Vec<char> =
-            "ab OR()\"':-NOTAND \u{2603}\u{1F980}".chars().collect();
+        let alphabet: Vec<char> = "ab OR()\"':-NOTAND \u{2603}\u{1F980}".chars().collect();
         let mut state = 0x2545_F491_4F6C_DD1D_u64;
         for len in 0..64 {
             let mut s = String::new();

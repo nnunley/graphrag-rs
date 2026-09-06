@@ -292,6 +292,8 @@ impl McpServer {
         else {
             return Ok(None);
         };
+        // LexicalIndex is only ever accessed under `lexical_cache`'s Mutex.
+        #[allow(clippy::arc_with_non_send_sync)]
         let arc = std::sync::Arc::new(index);
         let mut cache = self.lexical_cache.lock().unwrap();
         // Last-writer-wins on race; both Arc'd indexes are equivalent.
