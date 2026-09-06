@@ -23,10 +23,13 @@
 //!
 //! ## Usage
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! use graphrag_core::{BruteForceVectorSource, Database, VectorCandidateSource};
 //! use std::path::Path;
 //!
+//! # fn main() -> Result<(), graphrag_core::GraphRagError> {
+//! # let embedding = vec![0.0_f32; 768];
+//! # let query_embedding = vec![0.0_f32; 768];
 //! // Open database
 //! let db = Database::open(Path::new("data/graphrag.db"))?;
 //!
@@ -40,6 +43,9 @@
 //! // Search (cosine similarity, higher is better)
 //! let source = BruteForceVectorSource::for_store(&db, "documents")?;
 //! let results = source.top_candidates(&query_embedding, 10)?;
+//! # let _ = (store, results);
+//! # Ok(())
+//! # }
 //! ```
 
 pub mod capsule;
