@@ -1,0 +1,148 @@
+{
+  "classes": [
+    {
+      "expected": {
+        "query_results": []
+      },
+      "id": "empty",
+      "input": []
+    },
+    {
+      "id": "source-bytes",
+      "required_spans": [
+        "newline",
+        "non-ascii-utf8"
+      ],
+      "sources": [
+        {
+          "id": "conformance-fixture-v1:source:a",
+          "text": "alpha lexical-only\nnaïve café\n"
+        },
+        {
+          "id": "conformance-fixture-v1:source:b",
+          "text": "beta tie token\ntie token\n"
+        }
+      ]
+    },
+    {
+      "expected_outcomes": [
+        "Inserted",
+        "AlreadyPresent"
+      ],
+      "id": "replay",
+      "operation": "insert source:a twice identically"
+    },
+    {
+      "expected_outcome": "Conflict",
+      "id": "conflict",
+      "operation": "insert source:a identity with changed bytes"
+    },
+    {
+      "expected_domain_order": [
+        "source:a",
+        "source:b"
+      ],
+      "id": "domain-order",
+      "physical_insert_order": [
+        "source:b",
+        "source:a"
+      ]
+    },
+    {
+      "expected_outcomes": [
+        "Applied",
+        "StaleHead"
+      ],
+      "id": "head-cas"
+    },
+    {
+      "failpoint_expectation": "complete pre-state or complete post-state only",
+      "id": "atomic-command",
+      "records": [
+        "source:a",
+        "source:b"
+      ]
+    },
+    {
+      "boundaries": [
+        "empty",
+        "exact-page",
+        "continuation",
+        "end"
+      ],
+      "id": "pagination",
+      "page_size": 1
+    },
+    {
+      "id": "lexical",
+      "queries": [
+        {
+          "expected_ids": [
+            "source:a"
+          ],
+          "text": "lexical-only"
+        },
+        {
+          "expected_ids": [
+            "source:a",
+            "source:b"
+          ],
+          "text": "beta OR alpha"
+        },
+        {
+          "text": "tie token",
+          "tie_order": [
+            "source:a",
+            "source:b"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "derived-index-states",
+      "states": [
+        "missing",
+        "stale",
+        "corrupt",
+        "truncated",
+        "future-version"
+      ]
+    },
+    {
+      "fixtures": [
+        "current",
+        "legacy",
+        "future"
+      ],
+      "id": "readonly-formats",
+      "required_observations": [
+        "recursive_hash",
+        "mtime",
+        "sidecars"
+      ]
+    },
+    {
+      "allowed_fields": [
+        "domain_values",
+        "typed_outcomes",
+        "readiness_reasons",
+        "snapshot_commitment",
+        "index_commitment"
+      ],
+      "excluded_fields": [
+        "sqlite_pages",
+        "wal",
+        "file_paths",
+        "temp_names",
+        "leit_segment_paths",
+        "leit_doc_ids"
+      ],
+      "id": "canonical-transcript"
+    }
+  ],
+  "identity_namespace": "conformance-fixture-v1",
+  "license": "CC0-1.0; authored for this repository",
+  "schema": "graphrag-conformance-parity-corpus-draft-v1",
+  "status": "draft-not-production-evidence",
+  "warning": "These IDs and bytes are test fixtures and MUST NOT be relabeled as production evidence-v1."
+}

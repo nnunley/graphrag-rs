@@ -1,0 +1,563 @@
+{
+  "allowed_statuses": [
+    "planned",
+    "active",
+    "complete",
+    "blocked",
+    "legacy",
+    "cutover-ready",
+    "removed"
+  ],
+  "decisions": [
+    {
+      "id": "DL-003",
+      "selection": "static-core/dynamic-whole-service-pyo3",
+      "source": "confirmed boundary"
+    },
+    {
+      "id": "DL-009",
+      "selection": "B",
+      "source": "Norman 2026-08-12"
+    },
+    {
+      "id": "DL-023",
+      "selection": "D",
+      "source": "Norman 2026-08-12"
+    },
+    {
+      "id": "DL-024",
+      "selection": "A-target/C-staged",
+      "source": "Norman 2026-08-12"
+    },
+    {
+      "id": "DL-025",
+      "selection": "B",
+      "source": "Norman 2026-08-12"
+    },
+    {
+      "id": "DL-022",
+      "selection": "C",
+      "source": "Norman explicit override 2026-08-12"
+    }
+  ],
+  "inventory": {
+    "metadata": "tests/conformance/inventory/metadata.json",
+    "search_output": "tests/conformance/inventory/search-output.txt",
+    "symbols": "tests/conformance/inventory/symbols.jsonl"
+  },
+  "requirements": [
+    {
+      "id": "ARC-001",
+      "owned_by_scenario": "ARCH-STATIC-V1",
+      "responsible_milestone": "AS-001",
+      "status": "planned"
+    },
+    {
+      "id": "ARC-002",
+      "owned_by_scenario": "ARCH-STATIC-V1",
+      "responsible_milestone": "AS-001",
+      "status": "planned"
+    },
+    {
+      "id": "ARC-003",
+      "owned_by_scenario": "ARCH-STATIC-V1",
+      "responsible_milestone": "AS-001",
+      "status": "planned"
+    },
+    {
+      "id": "ARC-004",
+      "owned_by_scenario": "ARCH-STATIC-V1",
+      "responsible_milestone": "AS-001",
+      "status": "planned"
+    },
+    {
+      "id": "ARC-005",
+      "owned_by_scenario": "ARCH-STATIC-V1",
+      "responsible_milestone": "AS-001",
+      "status": "planned"
+    },
+    {
+      "id": "ARC-006",
+      "owned_by_scenario": "ARCH-STATIC-V1",
+      "responsible_milestone": "AS-001",
+      "status": "planned"
+    },
+    {
+      "id": "ARC-007",
+      "owned_by_scenario": "ARCH-STATIC-V1",
+      "responsible_milestone": "AS-001",
+      "status": "planned"
+    },
+    {
+      "id": "BEP-001",
+      "owned_by_scenario": "BACKEND-PARITY-V1",
+      "responsible_milestone": "AS-006",
+      "status": "planned"
+    },
+    {
+      "id": "BEP-002",
+      "owned_by_scenario": "BACKEND-PARITY-V1",
+      "responsible_milestone": "AS-006",
+      "status": "planned"
+    },
+    {
+      "id": "BEP-003",
+      "owned_by_scenario": "BACKEND-PARITY-V1",
+      "responsible_milestone": "AS-006",
+      "status": "planned"
+    },
+    {
+      "id": "BEP-004",
+      "owned_by_scenario": "BACKEND-PARITY-V1",
+      "responsible_milestone": "AS-006",
+      "status": "planned"
+    },
+    {
+      "id": "BEP-005",
+      "owned_by_scenario": "BACKEND-PARITY-V1",
+      "responsible_milestone": "AS-006",
+      "status": "planned"
+    },
+    {
+      "id": "BEP-006",
+      "owned_by_scenario": "BACKEND-PARITY-V1",
+      "responsible_milestone": "AS-006",
+      "status": "planned"
+    },
+    {
+      "id": "BEP-007",
+      "owned_by_scenario": "BACKEND-PARITY-V1",
+      "responsible_milestone": "AS-006",
+      "status": "planned"
+    },
+    {
+      "id": "SQL-001",
+      "owned_by_scenario": "SQLITE-SEMANTICS-V1",
+      "responsible_milestone": "AS-002",
+      "status": "planned"
+    },
+    {
+      "id": "SQL-002",
+      "owned_by_scenario": "SQLITE-SEMANTICS-V1",
+      "responsible_milestone": "AS-002",
+      "status": "planned"
+    },
+    {
+      "id": "SQL-003",
+      "owned_by_scenario": "SQLITE-SEMANTICS-V1",
+      "responsible_milestone": "AS-002",
+      "status": "planned"
+    },
+    {
+      "id": "SQL-004",
+      "owned_by_scenario": "SQLITE-SEMANTICS-V1",
+      "responsible_milestone": "AS-002",
+      "status": "planned"
+    },
+    {
+      "id": "SQL-005",
+      "owned_by_scenario": "SQLITE-SEMANTICS-V1",
+      "responsible_milestone": "AS-002",
+      "status": "planned"
+    },
+    {
+      "id": "FIL-001",
+      "owned_by_scenario": "FILE-SEMANTICS-V1",
+      "responsible_milestone": "AS-005",
+      "status": "planned"
+    },
+    {
+      "id": "FIL-002",
+      "owned_by_scenario": "FILE-SEMANTICS-V1",
+      "responsible_milestone": "AS-005",
+      "status": "planned"
+    },
+    {
+      "id": "FIL-003",
+      "owned_by_scenario": "FILE-SEMANTICS-V1",
+      "responsible_milestone": "AS-005",
+      "status": "planned"
+    },
+    {
+      "id": "FIL-004",
+      "owned_by_scenario": "FILE-SEMANTICS-V1",
+      "responsible_milestone": "AS-005",
+      "status": "planned"
+    },
+    {
+      "id": "FIL-005",
+      "owned_by_scenario": "FILE-SEMANTICS-V1",
+      "responsible_milestone": "AS-005",
+      "status": "planned"
+    },
+    {
+      "id": "FIL-006",
+      "owned_by_scenario": "FILE-SEMANTICS-V1",
+      "responsible_milestone": "AS-005",
+      "status": "planned"
+    },
+    {
+      "id": "IDX-001",
+      "owned_by_scenario": "LEIT-DERIVED-V1",
+      "responsible_milestone": "AS-003",
+      "status": "planned"
+    },
+    {
+      "id": "IDX-002",
+      "owned_by_scenario": "LEIT-DERIVED-V1",
+      "responsible_milestone": "AS-003",
+      "status": "planned"
+    },
+    {
+      "id": "IDX-003",
+      "owned_by_scenario": "LEIT-DERIVED-V1",
+      "responsible_milestone": "AS-003",
+      "status": "planned"
+    },
+    {
+      "id": "IDX-004",
+      "owned_by_scenario": "LEIT-DERIVED-V1",
+      "responsible_milestone": "AS-003",
+      "status": "planned"
+    },
+    {
+      "id": "IDX-005",
+      "owned_by_scenario": "LEIT-DERIVED-V1",
+      "responsible_milestone": "AS-003",
+      "status": "planned"
+    },
+    {
+      "id": "IDX-006",
+      "owned_by_scenario": "LEIT-DERIVED-V1",
+      "responsible_milestone": "AS-003",
+      "status": "planned"
+    },
+    {
+      "id": "IDX-007",
+      "owned_by_scenario": "LEIT-DERIVED-V1",
+      "responsible_milestone": "AS-003",
+      "status": "planned"
+    },
+    {
+      "id": "PY-001",
+      "owned_by_scenario": "PY-WHOLE-SERVICE-V1",
+      "responsible_milestone": "AS-004",
+      "status": "planned"
+    },
+    {
+      "id": "PY-002",
+      "owned_by_scenario": "PY-WHOLE-SERVICE-V1",
+      "responsible_milestone": "AS-004",
+      "status": "planned"
+    },
+    {
+      "id": "PY-003",
+      "owned_by_scenario": "PY-WHOLE-SERVICE-V1",
+      "responsible_milestone": "AS-004",
+      "status": "planned"
+    },
+    {
+      "id": "PY-004",
+      "owned_by_scenario": "PY-WHOLE-SERVICE-V1",
+      "responsible_milestone": "AS-004",
+      "status": "planned"
+    },
+    {
+      "id": "PY-005",
+      "owned_by_scenario": "PY-WHOLE-SERVICE-V1",
+      "responsible_milestone": "AS-004",
+      "status": "planned"
+    },
+    {
+      "id": "PY-006",
+      "owned_by_scenario": "PY-WHOLE-SERVICE-V1",
+      "responsible_milestone": "AS-004",
+      "status": "planned"
+    },
+    {
+      "id": "PY-007",
+      "owned_by_scenario": "PY-WHOLE-SERVICE-V1",
+      "responsible_milestone": "AS-004",
+      "status": "planned"
+    },
+    {
+      "id": "CON-001",
+      "owned_by_scenario": "CONSUMER-CUTOVER-V1",
+      "responsible_milestone": "AS-008",
+      "status": "planned"
+    },
+    {
+      "id": "CON-002",
+      "owned_by_scenario": "CONSUMER-CUTOVER-V1",
+      "responsible_milestone": "AS-008",
+      "status": "planned"
+    },
+    {
+      "id": "CON-003",
+      "owned_by_scenario": "CONSUMER-CUTOVER-V1",
+      "responsible_milestone": "AS-008",
+      "status": "planned"
+    },
+    {
+      "id": "CON-004",
+      "owned_by_scenario": "CONSUMER-CUTOVER-V1",
+      "responsible_milestone": "AS-008",
+      "status": "planned"
+    },
+    {
+      "id": "CON-005",
+      "owned_by_scenario": "CONSUMER-CUTOVER-V1",
+      "responsible_milestone": "AS-008",
+      "status": "planned"
+    },
+    {
+      "id": "CON-006",
+      "owned_by_scenario": "CONSUMER-CUTOVER-V1",
+      "responsible_milestone": "AS-008",
+      "status": "planned"
+    },
+    {
+      "id": "CON-007",
+      "owned_by_scenario": "CONSUMER-CUTOVER-V1",
+      "responsible_milestone": "AS-008",
+      "status": "planned"
+    },
+    {
+      "id": "OPS-001",
+      "owned_by_scenario": "RELEASE-SENTINELS-V1",
+      "responsible_milestone": "AS-009",
+      "status": "planned"
+    }
+  ],
+  "scenarios": {
+    "ARCH-STATIC-V1": {
+      "command": [
+        "{python}",
+        "scripts/conformance/run.py",
+        "--scenario",
+        "ARCH-STATIC-V1",
+        "--expect-logical",
+        "10",
+        "--expect-tests",
+        "10",
+        "--phase",
+        "green"
+      ],
+      "logical_count": 10,
+      "owner": "future milestone",
+      "status": "planned",
+      "test_count": 10
+    },
+    "BACKEND-PARITY-V1": {
+      "command": [
+        "{python}",
+        "scripts/conformance/run.py",
+        "--scenario",
+        "BACKEND-PARITY-V1",
+        "--expect-logical",
+        "24",
+        "--expect-tests",
+        "48",
+        "--phase",
+        "green"
+      ],
+      "logical_count": 24,
+      "owner": "future milestone",
+      "status": "planned",
+      "test_count": 48
+    },
+    "CONSUMER-CUTOVER-V1": {
+      "command": [
+        "{python}",
+        "scripts/conformance/run.py",
+        "--scenario",
+        "CONSUMER-CUTOVER-V1",
+        "--expect-logical",
+        "16",
+        "--expect-tests",
+        "16",
+        "--phase",
+        "green"
+      ],
+      "logical_count": 16,
+      "owner": "future milestone",
+      "status": "planned",
+      "test_count": 16
+    },
+    "FILE-SEMANTICS-V1": {
+      "command": [
+        "{python}",
+        "scripts/conformance/run.py",
+        "--scenario",
+        "FILE-SEMANTICS-V1",
+        "--expect-logical",
+        "16",
+        "--expect-tests",
+        "16",
+        "--phase",
+        "green"
+      ],
+      "logical_count": 16,
+      "owner": "future milestone",
+      "status": "planned",
+      "test_count": 16
+    },
+    "LEIT-DERIVED-V1": {
+      "command": [
+        "{python}",
+        "scripts/conformance/run.py",
+        "--scenario",
+        "LEIT-DERIVED-V1",
+        "--expect-logical",
+        "12",
+        "--expect-tests",
+        "24",
+        "--phase",
+        "green"
+      ],
+      "logical_count": 12,
+      "owner": "future milestone",
+      "status": "planned",
+      "test_count": 24
+    },
+    "MANIFEST-ARCH-SLICE": {
+      "command": [
+        "{python}",
+        "scripts/conformance/run.py",
+        "--scenario",
+        "MANIFEST-ARCH-SLICE",
+        "--expect-logical",
+        "12",
+        "--expect-tests",
+        "12",
+        "--phase",
+        "green"
+      ],
+      "logical_count": 12,
+      "owner": "AS-000",
+      "red_profiles": {
+        "MUT-MANIFEST-ORPHAN": [
+          "manifest.requirement_has_exactly_one_owner"
+        ],
+        "baseline": [
+          "manifest.requirement_has_exactly_one_owner"
+        ]
+      },
+      "status": "active",
+      "test_count": 12
+    },
+    "PRE-CUTOVER-SENTINELS-V1": {
+      "command": [
+        "{python}",
+        "scripts/conformance/run.py",
+        "--scenario",
+        "PRE-CUTOVER-SENTINELS-V1",
+        "--expect-logical",
+        "14",
+        "--expect-tests",
+        "14",
+        "--phase",
+        "green"
+      ],
+      "logical_count": 14,
+      "owner": "future milestone",
+      "status": "planned",
+      "test_count": 14
+    },
+    "PY-FILE-PARITY-V1": {
+      "command": [
+        "{python}",
+        "scripts/conformance/run.py",
+        "--scenario",
+        "PY-FILE-PARITY-V1",
+        "--expect-logical",
+        "8",
+        "--expect-tests",
+        "16",
+        "--phase",
+        "green"
+      ],
+      "logical_count": 8,
+      "owner": "future milestone",
+      "status": "planned",
+      "test_count": 16
+    },
+    "PY-WHOLE-SERVICE-V1": {
+      "command": [
+        "{python}",
+        "scripts/conformance/run.py",
+        "--scenario",
+        "PY-WHOLE-SERVICE-V1",
+        "--expect-logical",
+        "12",
+        "--expect-tests",
+        "12",
+        "--phase",
+        "green"
+      ],
+      "logical_count": 12,
+      "owner": "future milestone",
+      "status": "planned",
+      "test_count": 12
+    },
+    "RELEASE-SENTINELS-V1": {
+      "command": [
+        "{python}",
+        "scripts/conformance/run.py",
+        "--scenario",
+        "RELEASE-SENTINELS-V1",
+        "--expect-logical",
+        "14",
+        "--expect-tests",
+        "14",
+        "--phase",
+        "green"
+      ],
+      "logical_count": 14,
+      "owner": "future milestone",
+      "status": "planned",
+      "test_count": 14
+    },
+    "SQLITE-SEMANTICS-V1": {
+      "command": [
+        "{python}",
+        "scripts/conformance/run.py",
+        "--scenario",
+        "SQLITE-SEMANTICS-V1",
+        "--expect-logical",
+        "16",
+        "--expect-tests",
+        "16",
+        "--phase",
+        "green"
+      ],
+      "logical_count": 16,
+      "owner": "future milestone",
+      "status": "planned",
+      "test_count": 16
+    },
+    "WALKING-SKELETON-V1": {
+      "command": [
+        "{python}",
+        "scripts/conformance/run.py",
+        "--scenario",
+        "WALKING-SKELETON-V1",
+        "--expect-logical",
+        "8",
+        "--expect-tests",
+        "8",
+        "--phase",
+        "green"
+      ],
+      "logical_count": 8,
+      "owner": "future milestone",
+      "status": "planned",
+      "test_count": 8
+    }
+  },
+  "schema_version": 1,
+  "sources": {
+    "decisions": "docs/2026-08-12-storage-architecture-decisions.md",
+    "roadmap": "docs/2026-08-12-storage-architecture-tdd-roadmap.md"
+  }
+}

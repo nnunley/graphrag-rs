@@ -1,0 +1,54 @@
+{
+  "argv": [
+    "/opt/homebrew/opt/python@3.14/bin/python3.14",
+    "/Users/ndn/development/graphrag-rs/.worktrees/storage-architecture-tdd/tests/conformance/manifest_arch_slice.py",
+    "--root",
+    "/Users/ndn/development/graphrag-rs/.worktrees/storage-architecture-tdd",
+    "--manifest",
+    "/Users/ndn/development/graphrag-rs/.worktrees/storage-architecture-tdd/scripts/conformance/manifest.json",
+    "--result",
+    "/var/folders/vk/rkcd0mjn591_03z0856412gh0000gn/T/tmp_8tg43eg/result.json"
+  ],
+  "counts": {
+    "collected": 12,
+    "concrete": 12,
+    "executed": 12,
+    "logical": 12
+  },
+  "display_command": "/opt/homebrew/opt/python@3.14/bin/python3.14 /Users/ndn/development/graphrag-rs/.worktrees/storage-architecture-tdd/tests/conformance/manifest_arch_slice.py --root /Users/ndn/development/graphrag-rs/.worktrees/storage-architecture-tdd --manifest /Users/ndn/development/graphrag-rs/.worktrees/storage-architecture-tdd/scripts/conformance/manifest.json --result /var/folders/vk/rkcd0mjn591_03z0856412gh0000gn/T/tmp_8tg43eg/result.json",
+  "errors": [],
+  "failed": [
+    {
+      "id": "manifest.requirement_has_exactly_one_owner",
+      "message": "AssertionError: missing owner: ['ARC-001']"
+    }
+  ],
+  "filtered": [],
+  "ignored": [],
+  "inventory_sha256": "36d9a4d7c4deb786f75e12afe02d47b077b7fbcab3ebeee5eb56524765592a03",
+  "manifest_sha256": "3a15a36ba2b52ee424585db94b9d3d1d296df4f2d02e5e49990ca55dc29746bd",
+  "mutant": null,
+  "passed": [
+    "manifest.schema_version",
+    "manifest.roadmap_scenarios_covered",
+    "manifest.roadmap_requirements_covered",
+    "manifest.owners_resolve",
+    "manifest.statuses_valid",
+    "manifest.commands_valid",
+    "manifest.counts_positive",
+    "manifest.inventory_rows_owned",
+    "manifest.inventory_digest_reproducible",
+    "manifest.decisions_represented",
+    "manifest.scenario_counts_match_roadmap"
+  ],
+  "phase": "red",
+  "runner_exit": 0,
+  "scenario": "MANIFEST-ARCH-SLICE",
+  "schema_version": 1,
+  "skipped": [],
+  "timestamp_utc": "2026-08-12T16:18:54.486279+00:00",
+  "tree_sha256_after": "259df0892fad47b3d14a3b15c7f7eea797c905a11911bc406c74897d7d2b18d9",
+  "tree_sha256_before": "259df0892fad47b3d14a3b15c7f7eea797c905a11911bc406c74897d7d2b18d9",
+  "underlying_exit": 1,
+  "violations": []
+}

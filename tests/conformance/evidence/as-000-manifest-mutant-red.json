@@ -1,0 +1,56 @@
+{
+  "argv": [
+    "/Users/ndn/.local/share/mise/installs/python/latest/bin/python3",
+    "/Users/ndn/development/graphrag-rs/.worktrees/storage-architecture-tdd/tests/conformance/manifest_arch_slice.py",
+    "--root",
+    "/Users/ndn/development/graphrag-rs/.worktrees/storage-architecture-tdd",
+    "--manifest",
+    "/Users/ndn/development/graphrag-rs/.worktrees/storage-architecture-tdd/scripts/conformance/manifest.json",
+    "--result",
+    "/var/folders/vk/rkcd0mjn591_03z0856412gh0000gn/T/tmpry9np7dz/result.json",
+    "--mutant",
+    "MUT-MANIFEST-ORPHAN"
+  ],
+  "counts": {
+    "collected": 12,
+    "concrete": 12,
+    "executed": 12,
+    "logical": 12
+  },
+  "display_command": "/Users/ndn/.local/share/mise/installs/python/latest/bin/python3 /Users/ndn/development/graphrag-rs/.worktrees/storage-architecture-tdd/tests/conformance/manifest_arch_slice.py --root /Users/ndn/development/graphrag-rs/.worktrees/storage-architecture-tdd --manifest /Users/ndn/development/graphrag-rs/.worktrees/storage-architecture-tdd/scripts/conformance/manifest.json --result /var/folders/vk/rkcd0mjn591_03z0856412gh0000gn/T/tmpry9np7dz/result.json --mutant MUT-MANIFEST-ORPHAN",
+  "errors": [],
+  "failed": [
+    {
+      "id": "manifest.requirement_has_exactly_one_owner",
+      "message": "AssertionError: missing owner: ['ARC-001']"
+    }
+  ],
+  "filtered": [],
+  "ignored": [],
+  "inventory_sha256": "acdb0afddf808f0d662b5c811d9bf2c2346a80b7f2761c64b56445f2984a512c",
+  "manifest_sha256": "c073aab5d6ba19b1182e21d3740d002cf178ca0f04ab0124eed1a2bf17fcd1e4",
+  "mutant": "MUT-MANIFEST-ORPHAN",
+  "passed": [
+    "manifest.schema_version",
+    "manifest.roadmap_scenarios_covered",
+    "manifest.roadmap_requirements_covered",
+    "manifest.owners_resolve",
+    "manifest.statuses_valid",
+    "manifest.commands_valid",
+    "manifest.counts_positive",
+    "manifest.inventory_rows_owned",
+    "manifest.inventory_digest_reproducible",
+    "manifest.decisions_represented",
+    "manifest.scenario_counts_match_roadmap"
+  ],
+  "phase": "red",
+  "runner_exit": 0,
+  "scenario": "MANIFEST-ARCH-SLICE",
+  "schema_version": 1,
+  "skipped": [],
+  "timestamp_utc": "2026-10-18T19:55:12.322148+00:00",
+  "tree_sha256_after": "6e67f585cf59f85eaff179a09befc43edfe6b4c4103860e6d895362d8f4166a8",
+  "tree_sha256_before": "6e67f585cf59f85eaff179a09befc43edfe6b4c4103860e6d895362d8f4166a8",
+  "underlying_exit": 1,
+  "violations": []
+}

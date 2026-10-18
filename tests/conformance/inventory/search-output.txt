@@ -1,0 +1,450 @@
+graphrag-cli/src/main.rs:1181:let db = Database::open(&paths.db_path()).expect("db opens");
+graphrag-cli/src/main.rs:1196:let db = Database::open(&paths.db_path()).expect("db opens");
+graphrag-cli/src/main.rs:1224:let db = Database::open(&paths.db_path()).expect("db opens");
+graphrag-cli/src/main.rs:215:fn open_db() -> Result<Database, String> {
+graphrag-cli/src/main.rs:219:fn open_db_at(paths: &StoragePaths) -> Result<Database, String> {
+graphrag-cli/src/main.rs:221:Database::open(&paths.db_path()).map_err(|e| format!("open db: {e}"))
+graphrag-cli/src/main.rs:311:fn rebuild_lexical_sidecar(paths: &StoragePaths, db: &Database, store: &str) -> Result<(), String> {
+graphrag-cli/src/main.rs:3:BruteForceVectorSource, CommunityGraph, Database, Embedder, EmbedderConfig, EmbedderModel,
+graphrag-cli/src/main.rs:584:db: &Database,
+graphrag-cli/src/main.rs:625:db: &Database,
+graphrag-cli/src/main.rs:650:db: &Database,
+graphrag-cli/src/main.rs:673:index_to_db_id.insert(idx, community_id);
+graphrag-cli/tests/cli_enrich.rs:17:fn seed_graph(data_dir: &Path) -> Database {
+graphrag-cli/tests/cli_enrich.rs:18:let db = Database::open(&data_dir.join("graphrag.db")).expect("db opens");
+graphrag-cli/tests/cli_enrich.rs:2:use graphrag_core::Database;
+graphrag-cli/tests/cli_enrich.rs:64:let db = Database::open(&data_dir.join("graphrag.db")).expect("db opens");
+graphrag-cli/tests/cli_enrich.rs:92:let db = Database::open(&data_dir.join("graphrag.db")).expect("db opens");
+graphrag-cli/tests/cli_note.rs:28:let db = Database::open(&data_dir.join("graphrag.db")).expect("db opens");
+graphrag-cli/tests/cli_note.rs:2:use graphrag_core::Database;
+graphrag-cli/tests/mr_cli.rs:13:let db = Database::open(&dir.path().join("graphrag.db")).unwrap();
+graphrag-cli/tests/mr_cli.rs:6:use graphrag_core::Database;
+graphrag-core/Cargo.toml:24:rusqlite = { version = "0.32", features = ["bundled"] }
+graphrag-core/examples/test_features.rs:11:// Use a test database
+graphrag-core/examples/test_features.rs:17:let db = Database::open(&db_path).expect("Failed to open database");
+graphrag-core/examples/test_features.rs:18:println!("✓ Database opened at {:?}", db_path);
+graphrag-core/examples/test_features.rs:5:use graphrag_core::{Database, Embedder, EmbedderConfig, EmbedderModel};
+graphrag-core/examples/test_synonyms.rs:10:let db = Database::open(&db_path).expect("Failed to open db");
+graphrag-core/examples/test_synonyms.rs:1:use graphrag_core::{Database, canonical_relations, load_standard_synonyms};
+graphrag-core/examples/test_synonyms.rs:9:println!("Opening database at {:?}", db_path);
+graphrag-core/src/capsule.rs:401:if !ids.insert(e.evidence_id.as_str()) {
+graphrag-core/src/capsule_store.rs:102:.conn()
+graphrag-core/src/capsule_store.rs:103:.query_row(
+graphrag-core/src/capsule_store.rs:104:"SELECT body, content_fingerprint FROM capsules
+graphrag-core/src/capsule_store.rs:11:use rusqlite::{OptionalExtension, params};
+graphrag-core/src/capsule_store.rs:120:.conn()
+graphrag-core/src/capsule_store.rs:121:.query_row(
+graphrag-core/src/capsule_store.rs:122:"SELECT body, content_fingerprint FROM capsules
+graphrag-core/src/capsule_store.rs:133:let mut stmt = self.conn().prepare(
+graphrag-core/src/capsule_store.rs:134:"SELECT kind, capsule_id, project_id, content_fingerprint, generated_at
+graphrag-core/src/capsule_store.rs:155:let sql = "SELECT kind, capsule_id, project_id, content_fingerprint, generated_at
+graphrag-core/src/capsule_store.rs:156:FROM capsules WHERE id IN (SELECT MAX(id) FROM capsules GROUP BY capsule_id)
+graphrag-core/src/capsule_store.rs:159:let mut stmt = self.conn().prepare(sql)?;
+graphrag-core/src/capsule_store.rs:185:let db = Database::open(&dir.path().join("t.db")).unwrap();
+graphrag-core/src/capsule_store.rs:186:db.conn()
+graphrag-core/src/capsule_store.rs:188:"INSERT INTO capsules (capsule_id, project_id, kind, content_fingerprint, generated_at, body)
+graphrag-core/src/capsule_store.rs:1://! SQLite provider for [`CapsuleStore`], implemented on [`Database`].
+graphrag-core/src/capsule_store.rs:36:impl Database {
+graphrag-core/src/capsule_store.rs:72:impl CapsuleStore for Database {
+graphrag-core/src/capsule_store.rs:84:self.conn().execute(
+graphrag-core/src/capsule_store.rs:85:"INSERT INTO capsules (capsule_id, project_id, kind, content_fingerprint, generated_at, body)
+graphrag-core/src/capsule_store.rs:9:use crate::db::Database;
+graphrag-core/src/db.rs:1006:let mut stmt = self.conn.prepare(
+graphrag-core/src/db.rs:1007:"SELECT id, store, level, parent_id, summary, modularity, created_at FROM communities WHERE parent_id = ?1 ORDER BY id",
+graphrag-core/src/db.rs:1029:let mut stmt = self.conn.prepare(
+graphrag-core/src/db.rs:1030:"SELECT e.id, e.store, e.name, e.entity_type, e.properties
+graphrag-core/src/db.rs:103:let conn = Connection::open(path)?;
+graphrag-core/src/db.rs:1057:let mut stmt = self.conn.prepare(
+graphrag-core/src/db.rs:1058:"SELECT c.id, c.store, c.level, c.parent_id, c.summary, c.modularity, c.created_at
+graphrag-core/src/db.rs:1087:.query_row(
+graphrag-core/src/db.rs:1088:"SELECT canonical_relation FROM relation_synonyms WHERE raw_relation = ?1",
+graphrag-core/src/db.rs:1095:/// Add or update a relation synonym mapping
+graphrag-core/src/db.rs:1098:"INSERT OR REPLACE INTO relation_synonyms (raw_relation, canonical_relation) VALUES (?1, ?2)",
+graphrag-core/src/db.rs:1115:"DELETE FROM relation_synonyms WHERE raw_relation = ?1",
+graphrag-core/src/db.rs:1123:let mut stmt = self.conn.prepare(
+graphrag-core/src/db.rs:1124:"SELECT raw_relation, canonical_relation FROM relation_synonyms ORDER BY canonical_relation, raw_relation",
+graphrag-core/src/db.rs:1139:let mut stmt = self.conn.prepare(
+graphrag-core/src/db.rs:1140:"SELECT raw_relation FROM relation_synonyms WHERE canonical_relation = ?1 ORDER BY raw_relation",
+graphrag-core/src/db.rs:114:let has_parent_id: bool = tx.query_row(
+graphrag-core/src/db.rs:1151:/// Call this after adding new synonyms to update existing data
+graphrag-core/src/db.rs:1154:"UPDATE relations
+graphrag-core/src/db.rs:1156:SELECT canonical_relation FROM relation_synonyms
+graphrag-core/src/db.rs:115:"SELECT COUNT(*) > 0 FROM pragma_table_info('communities') WHERE name = 'parent_id'",
+graphrag-core/src/db.rs:1160:SELECT 1 FROM relation_synonyms
+graphrag-core/src/db.rs:1175:let mut stmt = self.conn.prepare(
+graphrag-core/src/db.rs:1176:"SELECT relation, canonical_relation, COUNT(*) as cnt
+graphrag-core/src/db.rs:1198:let mut stmt = self.conn.prepare(
+graphrag-core/src/db.rs:1199:"SELECT id, store, head_id, tail_id, relation, canonical_relation, properties
+graphrag-core/src/db.rs:1226:.query_row(
+graphrag-core/src/db.rs:1227:"SELECT canonical_type FROM entity_type_synonyms WHERE raw_type = ?1",
+graphrag-core/src/db.rs:1234:/// Add or update an entity type synonym mapping
+graphrag-core/src/db.rs:1237:"INSERT OR REPLACE INTO entity_type_synonyms (raw_type, canonical_type) VALUES (?1, ?2)",
+graphrag-core/src/db.rs:123:"ALTER TABLE communities ADD COLUMN parent_id INTEGER REFERENCES communities(id) ON DELETE CASCADE",
+graphrag-core/src/db.rs:1253:let mut stmt = self.conn.prepare(
+graphrag-core/src/db.rs:1254:"SELECT raw_type, canonical_type FROM entity_type_synonyms ORDER BY canonical_type, raw_type",
+graphrag-core/src/db.rs:1280:"INSERT OR REPLACE INTO entity_embeddings (entity_id, embedding) VALUES (?1, ?2)",
+graphrag-core/src/db.rs:1290:.query_row(
+graphrag-core/src/db.rs:1291:"SELECT embedding FROM entity_embeddings WHERE entity_id = ?1",
+graphrag-core/src/db.rs:1311:let mut stmt = self.conn.prepare(
+graphrag-core/src/db.rs:1312:"SELECT e.id, e.name, ee.embedding
+graphrag-core/src/db.rs:134:let has_canonical: bool = tx.query_row(
+graphrag-core/src/db.rs:135:"SELECT COUNT(*) > 0 FROM pragma_table_info('relations') WHERE name = 'canonical_relation'",
+graphrag-core/src/db.rs:1368:let source_name: String = self.conn.query_row(
+graphrag-core/src/db.rs:1369:"SELECT name FROM entities WHERE id = ?1",
+graphrag-core/src/db.rs:1374:// Update relations: change source_id to target_id in both head and tail
+graphrag-core/src/db.rs:1376:"UPDATE relations SET head_id = ?1 WHERE head_id = ?2",
+graphrag-core/src/db.rs:1380:"UPDATE relations SET tail_id = ?1 WHERE tail_id = ?2",
+graphrag-core/src/db.rs:1384:// Update chunk_entities links
+graphrag-core/src/db.rs:1385:// First, delete links that would become duplicates
+graphrag-core/src/db.rs:1387:"DELETE FROM chunk_entities
+graphrag-core/src/db.rs:1389:AND chunk_id IN (SELECT chunk_id FROM chunk_entities WHERE entity_id = ?2)",
+graphrag-core/src/db.rs:1392:// Then update remaining links
+graphrag-core/src/db.rs:1394:"UPDATE chunk_entities SET entity_id = ?1 WHERE entity_id = ?2",
+graphrag-core/src/db.rs:1400:"DELETE FROM extraction_entities
+graphrag-core/src/db.rs:1403:SELECT provenance_nonce FROM extraction_entities WHERE entity_id = ?2
+graphrag-core/src/db.rs:1408:"UPDATE extraction_entities SET entity_id = ?1 WHERE entity_id = ?2",
+graphrag-core/src/db.rs:1412:// Update community membership
+graphrag-core/src/db.rs:1414:"DELETE FROM entity_communities
+graphrag-core/src/db.rs:1416:AND community_id IN (SELECT community_id FROM entity_communities WHERE entity_id = ?2)",
+graphrag-core/src/db.rs:1420:"UPDATE entity_communities SET entity_id = ?1 WHERE entity_id = ?2",
+graphrag-core/src/db.rs:1426:"INSERT INTO entity_merges (target_entity_id, merged_entity_name) VALUES (?1, ?2)",
+graphrag-core/src/db.rs:1430:// Delete source entity (cascades to embedding)
+graphrag-core/src/db.rs:1432:.execute("DELETE FROM entities WHERE id = ?1", params![source_id])?;
+graphrag-core/src/db.rs:143:"ALTER TABLE relations ADD COLUMN canonical_relation TEXT",
+graphrag-core/src/db.rs:1442:let mut stmt = self.conn.prepare(
+graphrag-core/src/db.rs:1443:"SELECT merged_entity_name, merged_at FROM entity_merges WHERE target_entity_id = ?1 ORDER BY merged_at",
+graphrag-core/src/db.rs:1504:let db = Database::open(&dir.path().join("t.db")).unwrap();
+graphrag-core/src/db.rs:1523:let db = Database::open(&dir.path().join("t.db")).unwrap();
+graphrag-core/src/db.rs:1540:let db = Database::open(&dir.path().join("t.db")).unwrap();
+graphrag-core/src/db.rs:1549:fn temp_db() -> (Database, tempfile::TempDir) {
+graphrag-core/src/db.rs:1551:let db = Database::open(&dir.path().join("test.db")).expect("db opens");
+graphrag-core/src/db.rs:155:"CREATE TABLE IF NOT EXISTS relation_synonyms (
+graphrag-core/src/db.rs:174:"CREATE TABLE IF NOT EXISTS entity_type_synonyms (
+graphrag-core/src/db.rs:187:"CREATE TABLE IF NOT EXISTS entity_embeddings (
+graphrag-core/src/db.rs:188:entity_id INTEGER PRIMARY KEY REFERENCES entities(id) ON DELETE CASCADE,
+graphrag-core/src/db.rs:196:"CREATE TABLE IF NOT EXISTS entity_merges (
+graphrag-core/src/db.rs:206:.query_row(
+graphrag-core/src/db.rs:207:"SELECT COUNT(*) > 0 FROM pragma_table_info('extractions') WHERE name = 'provenance_nonce'",
+graphrag-core/src/db.rs:216:"ALTER TABLE extractions ADD COLUMN provenance_nonce TEXT",
+graphrag-core/src/db.rs:221:.query_row(
+graphrag-core/src/db.rs:222:"SELECT COUNT(*) > 0 FROM pragma_table_info('extractions') WHERE name = 'response_sha256'",
+graphrag-core/src/db.rs:229:"ALTER TABLE extractions ADD COLUMN response_sha256 TEXT",
+graphrag-core/src/db.rs:233:tx.execute_batch(
+graphrag-core/src/db.rs:236:CREATE TABLE IF NOT EXISTS extraction_entities (
+graphrag-core/src/db.rs:238:ON UPDATE CASCADE ON DELETE CASCADE,
+graphrag-core/src/db.rs:242:CREATE TABLE IF NOT EXISTS extraction_relations (
+graphrag-core/src/db.rs:244:ON UPDATE CASCADE ON DELETE CASCADE,
+graphrag-core/src/db.rs:258:/// Crate-internal connection access for sibling storage providers.
+graphrag-core/src/db.rs:259:pub(crate) fn conn(&self) -> &Connection {
+graphrag-core/src/db.rs:264:self.conn.execute_batch(
+graphrag-core/src/db.rs:266:CREATE TABLE IF NOT EXISTS stores (
+graphrag-core/src/db.rs:275:CREATE TABLE IF NOT EXISTS extractions (
+graphrag-core/src/db.rs:276:chunk_id INTEGER PRIMARY KEY REFERENCES chunks(id) ON DELETE CASCADE,
+graphrag-core/src/db.rs:284:CREATE TABLE IF NOT EXISTS capsules (
+graphrag-core/src/db.rs:298:CREATE TABLE IF NOT EXISTS chunk_embeddings (
+graphrag-core/src/db.rs:299:chunk_id INTEGER PRIMARY KEY REFERENCES chunks(id) ON DELETE CASCADE,
+graphrag-core/src/db.rs:2:use rusqlite::{Connection, OptionalExtension, params};
+graphrag-core/src/db.rs:303:CREATE TABLE IF NOT EXISTS chunks (
+graphrag-core/src/db.rs:305:store TEXT NOT NULL REFERENCES stores(name) ON DELETE CASCADE,
+graphrag-core/src/db.rs:313:CREATE TABLE IF NOT EXISTS entities (
+graphrag-core/src/db.rs:315:store TEXT NOT NULL REFERENCES stores(name) ON DELETE CASCADE,
+graphrag-core/src/db.rs:324:CREATE TABLE IF NOT EXISTS relations (
+graphrag-core/src/db.rs:326:store TEXT NOT NULL REFERENCES stores(name) ON DELETE CASCADE,
+graphrag-core/src/db.rs:327:head_id INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+graphrag-core/src/db.rs:328:tail_id INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+graphrag-core/src/db.rs:339:CREATE TABLE IF NOT EXISTS relation_synonyms (
+graphrag-core/src/db.rs:345:CREATE TABLE IF NOT EXISTS entity_type_synonyms (
+graphrag-core/src/db.rs:351:CREATE TABLE IF NOT EXISTS entity_embeddings (
+graphrag-core/src/db.rs:352:entity_id INTEGER PRIMARY KEY REFERENCES entities(id) ON DELETE CASCADE,
+graphrag-core/src/db.rs:357:CREATE TABLE IF NOT EXISTS entity_merges (
+graphrag-core/src/db.rs:364:CREATE TABLE IF NOT EXISTS chunk_entities (
+graphrag-core/src/db.rs:365:chunk_id INTEGER NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
+graphrag-core/src/db.rs:366:entity_id INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+graphrag-core/src/db.rs:370:CREATE TABLE IF NOT EXISTS communities (
+graphrag-core/src/db.rs:372:store TEXT NOT NULL REFERENCES stores(name) ON DELETE CASCADE,
+graphrag-core/src/db.rs:380:CREATE TABLE IF NOT EXISTS entity_communities (
+graphrag-core/src/db.rs:381:entity_id INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+graphrag-core/src/db.rs:382:community_id INTEGER NOT NULL REFERENCES communities(id) ON DELETE CASCADE,
+graphrag-core/src/db.rs:387:PRAGMA foreign_keys = ON;
+graphrag-core/src/db.rs:397:let exists: bool = self.conn.query_row(
+graphrag-core/src/db.rs:398:"SELECT EXISTS(SELECT 1 FROM stores WHERE name = ?1)",
+graphrag-core/src/db.rs:408:"INSERT INTO stores (name, dim) VALUES (?1, ?2)",
+graphrag-core/src/db.rs:417:.query_row(
+graphrag-core/src/db.rs:418:"SELECT name, dim, created_at FROM stores WHERE name = ?1",
+graphrag-core/src/db.rs:434:.prepare("SELECT name, dim, created_at FROM stores ORDER BY name")?;
+graphrag-core/src/db.rs:452:.execute("DELETE FROM stores WHERE name = ?1", params![name])?;
+graphrag-core/src/db.rs:465:let chunk_count: i64 = self.conn.query_row(
+graphrag-core/src/db.rs:466:"SELECT COUNT(*) FROM chunks WHERE store = ?1",
+graphrag-core/src/db.rs:471:let entity_count: i64 = self.conn.query_row(
+graphrag-core/src/db.rs:472:"SELECT COUNT(*) FROM entities WHERE store = ?1",
+graphrag-core/src/db.rs:477:let relation_count: i64 = self.conn.query_row(
+graphrag-core/src/db.rs:478:"SELECT COUNT(*) FROM relations WHERE store = ?1",
+graphrag-core/src/db.rs:499:"INSERT INTO chunks (store, content, source, metadata) VALUES (?1, ?2, ?3, ?4)",
+graphrag-core/src/db.rs:513:let mut stmt = self.conn.prepare(
+graphrag-core/src/db.rs:514:"SELECT id, store, content, source, metadata, created_at
+graphrag-core/src/db.rs:540:let mut stmt = self.conn.prepare(
+graphrag-core/src/db.rs:541:"SELECT id, store, content, source, metadata, created_at
+graphrag-core/src/db.rs:570:"SELECT id, store, content, source, metadata, created_at FROM chunks WHERE id IN ({})",
+graphrag-core/src/db.rs:574:let mut stmt = self.conn.prepare(&sql)?;
+graphrag-core/src/db.rs:575:let params: Vec<&dyn rusqlite::ToSql> =
+graphrag-core/src/db.rs:576:ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+graphrag-core/src/db.rs:614:.query_row(
+graphrag-core/src/db.rs:615:"SELECT id FROM entities
+graphrag-core/src/db.rs:624:// Update type/properties if provided
+graphrag-core/src/db.rs:627:"UPDATE entities SET entity_type = COALESCE(?3, entity_type), properties = COALESCE(?4, properties) WHERE id = ?1",
+graphrag-core/src/db.rs:636:"INSERT INTO entities (store, name, entity_type, properties) VALUES (?1, ?2, ?3, ?4)",
+graphrag-core/src/db.rs:646:let mut stmt = self.conn.prepare(
+graphrag-core/src/db.rs:647:"SELECT id, store, name, entity_type, properties FROM entities WHERE store = ?1 ORDER BY name",
+graphrag-core/src/db.rs:679:"INSERT INTO relations (store, head_id, tail_id, relation, canonical_relation, properties) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+graphrag-core/src/db.rs:687:let mut stmt = self.conn.prepare(
+graphrag-core/src/db.rs:688:"SELECT id, store, head_id, tail_id, relation, canonical_relation, properties FROM relations WHERE head_id = ?1 OR tail_id = ?1",
+graphrag-core/src/db.rs:710:.query_row(
+graphrag-core/src/db.rs:711:"SELECT id, store, name, entity_type, properties FROM entities WHERE store = ?1 AND name = ?2",
+graphrag-core/src/db.rs:730:"INSERT OR IGNORE INTO chunk_entities (chunk_id, entity_id) VALUES (?1, ?2)",
+graphrag-core/src/db.rs:739:.prepare("SELECT chunk_id FROM chunk_entities WHERE entity_id = ?1")?;
+graphrag-core/src/db.rs:749:let mut stmt = self.conn.prepare(
+graphrag-core/src/db.rs:750:"SELECT e.id, e.store, e.name, e.entity_type, e.properties
+graphrag-core/src/db.rs:777:let mut stmt = self.conn.prepare(
+graphrag-core/src/db.rs:778:"SELECT x.provenance_nonce
+graphrag-core/src/db.rs:809:.query_row(
+graphrag-core/src/db.rs:810:"SELECT x.chunk_id, x.model, x.triple_count, x.response_sha256, x.extracted_at
+graphrag-core/src/db.rs:831:let mut entity_stmt = self.conn.prepare(
+graphrag-core/src/db.rs:832:"SELECT e.id, e.store, e.name, e.entity_type, e.properties
+graphrag-core/src/db.rs:849:let mut relation_stmt = self.conn.prepare(
+graphrag-core/src/db.rs:850:"SELECT r.id, r.store, r.head_id, r.tail_id, r.relation,
+graphrag-core/src/db.rs:886:let mut stmt = self.conn.prepare(
+graphrag-core/src/db.rs:887:"SELECT id, store, head_id, tail_id, relation, canonical_relation, properties FROM relations WHERE store = ?1",
+graphrag-core/src/db.rs:910:.query_row(
+graphrag-core/src/db.rs:911:"SELECT id, store, name, entity_type, properties FROM entities WHERE id = ?1",
+graphrag-core/src/db.rs:92:pub struct Database {
+graphrag-core/src/db.rs:931:.execute("DELETE FROM communities WHERE store = ?1", params![store])?;
+graphrag-core/src/db.rs:93:conn: Connection,
+graphrag-core/src/db.rs:944:"INSERT INTO communities (store, level, modularity, parent_id) VALUES (?1, ?2, ?3, ?4)",
+graphrag-core/src/db.rs:957:"INSERT OR IGNORE INTO entity_communities (entity_id, community_id) VALUES (?1, ?2)",
+graphrag-core/src/db.rs:963:/// Update community summary
+graphrag-core/src/db.rs:96:impl Database {
+graphrag-core/src/db.rs:970:"UPDATE communities SET summary = ?2 WHERE id = ?1",
+graphrag-core/src/db.rs:980:let mut stmt = self.conn.prepare(
+graphrag-core/src/db.rs:981:"SELECT id, store, level, parent_id, summary, modularity, created_at FROM communities WHERE store = ?1 ORDER BY level, id",
+graphrag-core/src/entity_types.rs:137:/// Load standard entity type synonyms into a database
+graphrag-core/src/entity_types.rs:139:pub fn load_standard_type_synonyms(db: &crate::Database) -> Result<usize, crate::GraphRagError> {
+graphrag-core/src/entity_types.rs:93:("database", "technology"),
+graphrag-core/src/error.rs:5:#[error("Database error: {0}")]
+graphrag-core/src/error.rs:6:Database(#[from] rusqlite::Error),
+graphrag-core/src/export.rs:3:use crate::{Database, GraphRagError};
+graphrag-core/src/export.rs:8:pub fn export_store(db: &Database, store: &str, out: &mut impl Write) -> Result<(), GraphRagError> {
+graphrag-core/src/leiden.rs:158:self.node_to_idx.insert(node_id, idx);
+graphrag-core/src/leiden.rs:175:// Update the reverse edge too
+graphrag-core/src/leiden.rs:212:nodes.insert(self.nodes[0]);
+graphrag-core/src/leiden.rs:226:set.insert(id);
+graphrag-core/src/leiden.rs:262:// Update assignments from refined communities
+graphrag-core/src/leiden.rs:351:// Update community degrees
+graphrag-core/src/leiden.rs:367:communities_by_id.entry(comm).or_default().insert(node_idx);
+graphrag-core/src/leiden.rs:392:if !visited.insert(node) {
+graphrag-core/src/leiden.rs:413:// Update current community to only visited nodes
+graphrag-core/src/leiden.rs:557:// Update the modularity for this level
+graphrag-core/src/leiden.rs:738:if !visited.insert(node) {
+graphrag-core/src/leiden.rs:802:if !visited.insert(node) {
+graphrag-core/src/leiden.rs:84:/// Node IDs (entity IDs from database)
+graphrag-core/src/lib.rs:19://! │ Database │ Vectors │ Leiden │
+graphrag-core/src/lib.rs:27://! use graphrag_core::{BruteForceVectorSource, Database, VectorCandidateSource};
+graphrag-core/src/lib.rs:33://! // Open database
+graphrag-core/src/lib.rs:34://! let db = Database::open(Path::new("data/graphrag.db"))?;
+graphrag-core/src/lib.rs:81:Chunk, CommunityRecord, Database, Entity, EntityInput, ExtractionProvenance, Relation, Store,
+graphrag-core/src/mr.rs:133:hash.update((part.len() as u64).to_be_bytes());
+graphrag-core/src/mr.rs:134:hash.update(part);
+graphrag-core/src/mr.rs:156:db: &Database,
+graphrag-core/src/mr.rs:176:db: &Database,
+graphrag-core/src/mr.rs:183:.conn()
+graphrag-core/src/mr.rs:184:.query_row(
+graphrag-core/src/mr.rs:185:"SELECT content FROM chunks WHERE id = ?1 AND store = ?2",
+graphrag-core/src/mr.rs:206:impl Database {
+graphrag-core/src/mr.rs:213:let mut stmt = self.conn().prepare(
+graphrag-core/src/mr.rs:214:"SELECT c.id, c.content FROM chunks c
+graphrag-core/src/mr.rs:216:AND c.id NOT IN (SELECT chunk_id FROM extractions)
+graphrag-core/src/mr.rs:237:let tx = self.conn().unchecked_transaction()?;
+graphrag-core/src/mr.rs:239:"INSERT INTO extractions
+graphrag-core/src/mr.rs:24:use crate::db::{Database, EntityInput};
+graphrag-core/src/mr.rs:252:let existing: (Option<String>, Option<String>) = tx.query_row(
+graphrag-core/src/mr.rs:253:"SELECT provenance_nonce, response_sha256 FROM extractions WHERE chunk_id = ?1",
+graphrag-core/src/mr.rs:26:use rusqlite::{OptionalExtension, Transaction, params};
+graphrag-core/src/mr.rs:286:"INSERT OR IGNORE INTO chunk_entities (chunk_id, entity_id) VALUES (?1, ?2)",
+graphrag-core/src/mr.rs:290:"INSERT OR IGNORE INTO extraction_entities
+graphrag-core/src/mr.rs:297:"INSERT OR IGNORE INTO extraction_relations (provenance_nonce, relation_id)
+graphrag-core/src/mr.rs:315:.query_row(
+graphrag-core/src/mr.rs:316:"SELECT id FROM entities
+graphrag-core/src/mr.rs:326:"UPDATE entities SET entity_type = COALESCE(?2, entity_type) WHERE id = ?1",
+graphrag-core/src/mr.rs:333:"INSERT INTO entities (store, name, entity_type, properties)
+graphrag-core/src/mr.rs:349:.query_row(
+graphrag-core/src/mr.rs:350:"SELECT canonical_relation FROM relation_synonyms WHERE raw_relation = ?1",
+graphrag-core/src/mr.rs:360:.query_row(
+graphrag-core/src/mr.rs:361:"SELECT id FROM relations
+graphrag-core/src/mr.rs:373:"INSERT INTO relations
+graphrag-core/src/mr.rs:410:db: &Database,
+graphrag-core/src/mr.rs:469:db: &Database,
+graphrag-core/src/mr.rs:482:impl Database {
+graphrag-core/src/mr.rs:488:let mut stmt = self.conn().prepare(
+graphrag-core/src/mr.rs:489:"SELECT id, summary FROM communities
+graphrag-core/src/mr.rs:510:let mut stmt = self.conn().prepare(
+graphrag-core/src/mr.rs:511:"SELECT id, level FROM communities c
+graphrag-core/src/mr.rs:514:SELECT 1 FROM communities k
+graphrag-core/src/mr.rs:576:pub fn pipeline_status(db: &Database, store: &str) -> Result<PipelineStatus, GraphRagError> {
+graphrag-core/src/mr.rs:711:impl Database {
+graphrag-core/src/mr.rs:715:let n: i64 = self.conn().query_row(
+graphrag-core/src/mr.rs:716:"SELECT COUNT(*) FROM entities e
+graphrag-core/src/mr.rs:718:AND e.id NOT IN (SELECT entity_id FROM entity_communities)",
+graphrag-core/src/mr.rs:772:db: &Database,
+graphrag-core/src/mr.rs:806:if seen.insert(e.id) {
+graphrag-core/src/mr.rs:818:owner.insert(e, gi);
+graphrag-core/src/mr.rs:83:db: &Database,
+graphrag-core/src/mr.rs:845:grouped.insert(gi as usize);
+graphrag-core/src/mr.rs:936:db: &Database,
+graphrag-core/src/mr.rs:956:db: &Database,
+graphrag-core/src/mr.rs:967:impl Database {
+graphrag-core/src/mr.rs:974:let mut stmt = self.conn().prepare(
+graphrag-core/src/mr.rs:975:"SELECT id, name, entity_type FROM entities
+graphrag-core/src/mr.rs:976:WHERE store = ?1 AND id NOT IN (SELECT entity_id FROM entity_embeddings)
+graphrag-core/src/paper.rs:1235:if expected_by_id.insert(&report.report_id, report).is_some() {
+graphrag-core/src/paper.rs:1252:if report_by_id.insert(&report.report_id, report).is_some() {
+graphrag-core/src/paper.rs:1312:if batch_by_id.insert(&batch.batch_id, batch).is_some() {
+graphrag-core/src/paper.rs:1336:if map_by_batch.insert(&result.batch_id, result).is_some() {
+graphrag-core/src/synonyms.rs:104:/// Load standard synonyms into a database
+graphrag-core/src/synonyms.rs:105:pub fn load_standard_synonyms(db: &crate::Database) -> Result<usize, crate::GraphRagError> {
+graphrag-core/src/token.rs:125:hash.update((part.len() as u64).to_be_bytes());
+graphrag-core/src/token.rs:126:hash.update(part);
+graphrag-core/src/vector_source.rs:118:impl Database {
+graphrag-core/src/vector_source.rs:126:self.conn().execute(
+graphrag-core/src/vector_source.rs:127:"INSERT OR REPLACE INTO chunk_embeddings (chunk_id, embedding) VALUES (?1, ?2)",
+graphrag-core/src/vector_source.rs:135:use rusqlite::OptionalExtension;
+graphrag-core/src/vector_source.rs:137:.conn()
+graphrag-core/src/vector_source.rs:138:.query_row(
+graphrag-core/src/vector_source.rs:139:"SELECT embedding FROM chunk_embeddings WHERE chunk_id = ?1",
+graphrag-core/src/vector_source.rs:149:let mut stmt = self.conn().prepare(
+graphrag-core/src/vector_source.rs:14:use crate::db::Database;
+graphrag-core/src/vector_source.rs:150:"SELECT ce.chunk_id, ce.embedding
+graphrag-core/src/vector_source.rs:16:use rusqlite::params;
+graphrag-core/src/vector_source.rs:45:pub fn for_store(db: &Database, store: &str) -> Result<Self, GraphRagError> {
+graphrag-core/tests/capsule_contract.rs:50:first_action: "Wire capsule storage into Database.".into(),
+graphrag-core/tests/capsule_store.rs:2:use graphrag_core::Database;
+graphrag-core/tests/capsule_store.rs:65:fn open_db(dir: &TempDir) -> Database {
+graphrag-core/tests/capsule_store.rs:66:Database::open(&dir.path().join("test.db")).unwrap()
+graphrag-core/tests/export.rs:1:use graphrag_core::{Database, GraphRagError, export::export_store};
+graphrag-core/tests/export.rs:5:fn setup_db(dir: &TempDir) -> Database {
+graphrag-core/tests/export.rs:6:let db = Database::open(&dir.path().join("t.db")).unwrap();
+graphrag-core/tests/export.rs:84:let db = Database::open(&dir.path().join("t.db")).unwrap();
+graphrag-core/tests/export.rs:96:let db = Database::open(&dir.path().join("t.db")).unwrap();
+graphrag-core/tests/mr_contract.rs:101:let db = Database::open(&path).unwrap();
+graphrag-core/tests/mr_contract.rs:1029:fn seed_connected_graph(db: &Database) {
+graphrag-core/tests/mr_contract.rs:127:let conn = Connection::open(path).unwrap();
+graphrag-core/tests/mr_contract.rs:130:.query_row(
+graphrag-core/tests/mr_contract.rs:131:"SELECT COUNT(*) > 0 FROM pragma_table_info('extractions') WHERE name = ?1",
+graphrag-core/tests/mr_contract.rs:139:.query_row("SELECT COUNT(*) FROM extraction_relations", [], |row| {
+graphrag-core/tests/mr_contract.rs:15:use rusqlite::Connection;
+graphrag-core/tests/mr_contract.rs:434:let conn = Connection::open(dir.path().join("t.db")).unwrap();
+graphrag-core/tests/mr_contract.rs:435:conn.execute_batch(
+graphrag-core/tests/mr_contract.rs:437:BEFORE INSERT ON extraction_relations
+graphrag-core/tests/mr_contract.rs:438:WHEN (SELECT COUNT(*) FROM extraction_relations) > 0
+graphrag-core/tests/mr_contract.rs:439:BEGIN SELECT RAISE(ABORT, 'injected mid-write failure'); END;",
+graphrag-core/tests/mr_contract.rs:5:use graphrag_core::Database;
+graphrag-core/tests/mr_contract.rs:66:fn db_with_chunks(n: usize) -> (TempDir, Database) {
+graphrag-core/tests/mr_contract.rs:677:fn db_with_community() -> (TempDir, Database, i64) {
+graphrag-core/tests/mr_contract.rs:68:let db = Database::open(&dir.path().join("t.db")).unwrap();
+graphrag-core/tests/mr_contract.rs:81:let conn = Connection::open(&path).unwrap();
+graphrag-core/tests/mr_contract.rs:82:conn.execute_batch(
+graphrag-core/tests/mr_contract.rs:83:"CREATE TABLE stores (
+graphrag-core/tests/mr_contract.rs:86:CREATE TABLE chunks (
+graphrag-core/tests/mr_contract.rs:90:CREATE TABLE extractions (
+graphrag-core/tests/mr_contract.rs:94:INSERT INTO stores VALUES ('s', 3, datetime('now'));
+graphrag-core/tests/mr_contract.rs:95:INSERT INTO chunks VALUES (1, 's', 'legacy chunk', NULL, NULL, datetime('now'));
+graphrag-core/tests/mr_contract.rs:96:INSERT INTO extractions VALUES (1, 'legacy-model', 2, datetime('now'));",
+graphrag-core/tests/paper_contract.rs:308:if !all_community_ids.insert(community.community_id) {
+graphrag-core/tests/paper_contract.rs:315:if !seen.insert(member.as_str()) {
+graphrag-core/tests/paper_contract.rs:998:// Delete one report everywhere inside a now self-consistent replanned trace:
+graphrag-core/tests/vector_source.rs:13:fn add_chunk(db: &Database, content: &str, embedding: &[f32]) -> i64 {
+graphrag-core/tests/vector_source.rs:4:use graphrag_core::{Database, GraphRagError};
+graphrag-core/tests/vector_source.rs:7:fn db_with_store(dir: &TempDir, dim: usize) -> Database {
+graphrag-core/tests/vector_source.rs:8:let db = Database::open(&dir.path().join("t.db")).unwrap();
+graphrag-mcp/src/main.rs:1288:// Open database
+graphrag-mcp/src/main.rs:1289:let db = match Database::open(&self.db_path()) {
+graphrag-mcp/src/main.rs:1452:let db = match Database::open(&self.db_path()) {
+graphrag-mcp/src/main.rs:1514:let db = match Database::open(&self.db_path()) {
+graphrag-mcp/src/main.rs:1553:let db = match Database::open(&self.db_path()) {
+graphrag-mcp/src/main.rs:1632:let db = match Database::open(&self.db_path()) {
+graphrag-mcp/src/main.rs:1660:let db = match Database::open(&self.db_path()) {
+graphrag-mcp/src/main.rs:1694:let db = match Database::open(&self.db_path()) {
+graphrag-mcp/src/main.rs:1737:let db = match Database::open(&self.db_path()) {
+graphrag-mcp/src/main.rs:1786:let db = match Database::open(&self.db_path()) {
+graphrag-mcp/src/main.rs:1984:let db = match Database::open(&self.db_path()) {
+graphrag-mcp/src/main.rs:2035:let db = match Database::open(&self.db_path()) {
+graphrag-mcp/src/main.rs:2092:let db = match Database::open(&self.db_path()) {
+graphrag-mcp/src/main.rs:2133:let db = match Database::open(&self.db_path()) {
+graphrag-mcp/src/main.rs:2172:db: &Database,
+graphrag-mcp/src/main.rs:2181:seen_chunks.insert(*chunk_id);
+graphrag-mcp/src/main.rs:2208:expanded_chunk_ids.insert(related_id);
+graphrag-mcp/src/main.rs:276:db: &Database,
+graphrag-mcp/src/main.rs:301:cache.insert(store.to_string(), arc.clone());
+graphrag-mcp/src/main.rs:695:self.pending_operations.insert(request_id, operation);
+graphrag-mcp/src/main.rs:7:BruteForceVectorSource, ChunkerConfig, CodeChunkerConfig, CodeLanguage, Database, Embedder,
+graphrag-nushell/src/commands/add.rs:105:db: &Database,
+graphrag-nushell/src/commands/add.rs:148:// Add chunk to database
+graphrag-nushell/src/commands/add.rs:33:.category(Category::Database)
+graphrag-nushell/src/commands/add.rs:46:let db = Database::open(&plugin.db_path).map_err(|e| e.into_labeled_error(span))?;
+graphrag-nushell/src/commands/add.rs:4:Database, EntityInput, ExtractResult, GraphRagError, apply_extracted_entities,
+graphrag-nushell/src/commands/communities.rs:145:fn community_to_value(community: &Community, db: &Database, span: nu_protocol::Span) -> Value {
+graphrag-nushell/src/commands/communities.rs:37:.category(Category::Database)
+graphrag-nushell/src/commands/communities.rs:3:use graphrag_core::Database;
+graphrag-nushell/src/commands/communities.rs:52:let db = Database::open(&plugin.db_path).map_err(|e| e.into_labeled_error(span))?;
+graphrag-nushell/src/commands/create.rs:30:.category(Category::Database)
+graphrag-nushell/src/commands/create.rs:3:use graphrag_core::Database;
+graphrag-nushell/src/commands/create.rs:44:// Create database and store
+graphrag-nushell/src/commands/create.rs:45:let db = Database::open(&plugin.db_path).map_err(|e| e.into_labeled_error(span))?;
+graphrag-nushell/src/commands/delete.rs:13:"graphrag delete"
+graphrag-nushell/src/commands/delete.rs:17:"Delete a GraphRAG store"
+graphrag-nushell/src/commands/delete.rs:21:Signature::build("graphrag delete")
+graphrag-nushell/src/commands/delete.rs:22:.required("name", SyntaxShape::String, "Name of the store to delete")
+graphrag-nushell/src/commands/delete.rs:24:.category(Category::Database)
+graphrag-nushell/src/commands/delete.rs:37:let db = Database::open(&plugin.db_path).map_err(|e| e.into_labeled_error(span))?;
+graphrag-nushell/src/commands/delete.rs:3:use graphrag_core::Database;
+graphrag-nushell/src/commands/entities.rs:24:.category(Category::Database)
+graphrag-nushell/src/commands/entities.rs:37:let db = Database::open(&plugin.db_path).map_err(|e| e.into_labeled_error(span))?;
+graphrag-nushell/src/commands/entities.rs:3:use graphrag_core::Database;
+graphrag-nushell/src/commands/get_community.rs:105:"graphrag update-summary"
+graphrag-nushell/src/commands/get_community.rs:109:"Update the summary for a community (typically from LLM output)"
+graphrag-nushell/src/commands/get_community.rs:113:Signature::build("graphrag update-summary")
+graphrag-nushell/src/commands/get_community.rs:117:.category(Category::Database)
+graphrag-nushell/src/commands/get_community.rs:131:let db = Database::open(&plugin.db_path).map_err(|e| e.into_labeled_error(span))?;
+graphrag-nushell/src/commands/get_community.rs:166:.category(Category::Database)
+graphrag-nushell/src/commands/get_community.rs:179:let db = Database::open(&plugin.db_path).map_err(|e| e.into_labeled_error(span))?;
+graphrag-nushell/src/commands/get_community.rs:25:.category(Category::Database)
+graphrag-nushell/src/commands/get_community.rs:39:let db = Database::open(&plugin.db_path).map_err(|e| e.into_labeled_error(span))?;
+graphrag-nushell/src/commands/get_community.rs:3:use graphrag_core::Database;
+graphrag-nushell/src/commands/info.rs:15:"Show GraphRAG configuration (data directory, database path)"
+graphrag-nushell/src/commands/info.rs:21:.category(Category::Database)
+graphrag-nushell/src/commands/list.rs:23:.category(Category::Database)
+graphrag-nushell/src/commands/list.rs:35:let db = Database::open(&plugin.db_path).map_err(|e| e.into_labeled_error(span))?;
+graphrag-nushell/src/commands/list.rs:3:use graphrag_core::Database;
+graphrag-nushell/src/commands/mod.rs:17:pub use delete::GraphRagDelete;
+graphrag-nushell/src/commands/mod.rs:4:mod delete;
+graphrag-nushell/src/commands/query.rs:110:new_entities.insert(rel.head_id);
+graphrag-nushell/src/commands/query.rs:113:new_entities.insert(rel.tail_id);
+graphrag-nushell/src/commands/query.rs:123:expanded_chunk_ids.insert(chunk_id);
+graphrag-nushell/src/commands/query.rs:3:use graphrag_core::Database;
+graphrag-nushell/src/commands/query.rs:43:.category(Category::Database)
+graphrag-nushell/src/commands/query.rs:73:let db = Database::open(&plugin.db_path).map_err(|e| e.into_labeled_error(span))?;
+graphrag-nushell/src/commands/query.rs:93:all_entity_ids.insert(entity.id);
+graphrag-nushell/src/commands/relations.rs:25:.category(Category::Database)
+graphrag-nushell/src/commands/relations.rs:39:let db = Database::open(&plugin.db_path).map_err(|e| e.into_labeled_error(span))?;
+graphrag-nushell/src/commands/relations.rs:3:use graphrag_core::Database;
+graphrag-nushell/src/commands/search.rs:36:.category(Category::Database)
+graphrag-nushell/src/commands/search.rs:3:use graphrag_core::Database;
+graphrag-nushell/src/commands/search.rs:65:let db = Database::open(&plugin.db_path).map_err(|e| e.into_labeled_error(span))?;
+graphrag-nushell/src/commands/store_communities.rs:112:// Map from flat index to database ID
+graphrag-nushell/src/commands/store_communities.rs:122:// Get parent's database ID
+graphrag-nushell/src/commands/store_communities.rs:137:index_to_db_id.insert(idx, community_id);
+graphrag-nushell/src/commands/store_communities.rs:4:use graphrag_core::Database;
+graphrag-nushell/src/commands/store_communities.rs:55:.category(Category::Database)
+graphrag-nushell/src/commands/store_communities.rs:73:let db = Database::open(&plugin.db_path).map_err(|e| e.into_labeled_error(span))?;
+graphrag-py/src/lib.rs:104:db: Mutex<Database>,
+graphrag-py/src/lib.rs:110:/// Open (or create) the database under `data_dir`.
+graphrag-py/src/lib.rs:116:let db = Database::open(&dir.join("graphrag.db")).map_err(err)?;
+graphrag-py/src/lib.rs:18:BruteForceVectorSource, Database, Embedder, LexicalIndex, VectorCandidateSource,
