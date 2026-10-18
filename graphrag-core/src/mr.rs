@@ -145,11 +145,13 @@ fn hex_bytes(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-/// Parse and atomically persist executor results with exact provenance.
+/// Parse and persist executor results with exact provenance.
 ///
-/// Every result must echo the nonce emitted by [`plan_extract`]. The checkpoint,
-/// involved entities, and emitted relations commit in one transaction. A bad
-/// nonce writes nothing; re-applying the same nonce is a no-op.
+/// Every result must echo the nonce emitted by [`plan_extract`]. Each result's
+/// checkpoint, involved entities, and emitted relations commit in their own
+/// transaction, so a batch is not atomic: results before a failing one stay
+/// committed. A bad nonce writes nothing for that result, and re-applying the
+/// same nonce is a no-op, so retrying a failed batch is safe.
 pub fn apply_extract(
     db: &Database,
     store: &str,
@@ -270,7 +272,15 @@ impl Database {
                 tx_get_or_create_entity(&tx, store, &triple.head, triple.head_type.as_deref())?;
             let tail_id =
                 tx_get_or_create_entity(&tx, store, &triple.tail, triple.tail_type.as_deref())?;
-            let relation_id = tx_add_relation(&tx, store, head_id, tail_id, &triple.relation)?;
+            let properties = triple.properties.as_ref().map(|value| value.to_string());
+            let relation_id = tx_add_relation(
+                &tx,
+                store,
+                head_id,
+                tail_id,
+                &triple.relation,
+                properties.as_deref(),
+            )?;
             for entity_id in [head_id, tail_id] {
                 tx.execute(
                     "INSERT OR IGNORE INTO chunk_entities (chunk_id, entity_id) VALUES (?1, ?2)",
@@ -282,8 +292,9 @@ impl Database {
                     params![result.provenance_nonce, entity_id],
                 )?;
             }
+            // A triple repeated within one response is one relationship instance.
             tx.execute(
-                "INSERT INTO extraction_relations (provenance_nonce, relation_id)
+                "INSERT OR IGNORE INTO extraction_relations (provenance_nonce, relation_id)
                  VALUES (?1, ?2)",
                 params![result.provenance_nonce, relation_id],
             )?;
@@ -332,6 +343,7 @@ fn tx_add_relation(
     head_id: i64,
     tail_id: i64,
     relation: &str,
+    properties: Option<&str>,
 ) -> Result<i64, GraphRagError> {
     let canonical = tx
         .query_row(
@@ -340,24 +352,28 @@ fn tx_add_relation(
             |row| row.get::<_, String>(0),
         )
         .optional()?;
-    if let Some(id) = tx
-        .query_row(
-            "SELECT id FROM relations
+    // Property-less triples share one physical edge; repeated evidence is
+    // counted through extraction_relations, not duplicate rows. A triple that
+    // carries properties keeps its own row so the properties are not lost.
+    if properties.is_none()
+        && let Some(id) = tx
+            .query_row(
+                "SELECT id FROM relations
              WHERE store = ?1 AND head_id = ?2 AND tail_id = ?3
                AND relation = ?4 AND properties IS NULL
              ORDER BY id LIMIT 1",
-            params![store, head_id, tail_id, relation],
-            |row| row.get::<_, i64>(0),
-        )
-        .optional()?
+                params![store, head_id, tail_id, relation],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
     {
         return Ok(id);
     }
     tx.execute(
         "INSERT INTO relations
              (store, head_id, tail_id, relation, canonical_relation, properties)
-         VALUES (?1, ?2, ?3, ?4, ?5, NULL)",
-        params![store, head_id, tail_id, relation, canonical],
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![store, head_id, tail_id, relation, canonical, properties],
     )?;
     Ok(tx.last_insert_rowid())
 }

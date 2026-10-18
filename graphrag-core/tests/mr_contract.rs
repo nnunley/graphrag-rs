@@ -6,8 +6,9 @@ use graphrag_core::Database;
 use graphrag_core::db::EntityInput;
 use graphrag_core::mr::{
     EmbedResult, ExtractPrompt, ExtractResult, ExtractionStrategy, SummaryResult, WorkUnit,
-    apply_embed, apply_extract, apply_summarize, build_community_hierarchy,
-    extraction_provenance_nonce, pipeline_status, plan_embed, plan_extract, plan_summarize,
+    apply_embed, apply_extract, apply_extracted_entities, apply_summarize,
+    build_community_hierarchy, extraction_provenance_nonce, pipeline_status, plan_embed,
+    plan_extract, plan_summarize,
 };
 use hegel::TestCase;
 use hegel::generators as gs;
@@ -472,6 +473,55 @@ fn invalid_provenance_nonce_rolls_back_everything() {
             .unwrap()
             .is_none()
     );
+}
+
+#[test]
+fn repeated_triple_in_one_response_is_one_relationship_instance() {
+    let (_d, db) = db_with_chunks(1);
+    let unit = plan_extract(&db, "s", "m", S, None).unwrap().remove(0);
+    let nonce = unit.provenance_nonce.clone().unwrap();
+    apply_extract(
+        &db,
+        "s",
+        S,
+        &[ExtractResult {
+            chunk_id: unit.chunk_id,
+            model: unit.model,
+            provenance_nonce: nonce.clone(),
+            response: "Alice (Person) -[uses]-> GraphRAG (Software)\nAlice (Person) -[uses]-> GraphRAG (Software)".into(),
+        }],
+    )
+    .expect("a repeated triple must not abort the chunk");
+    assert_eq!(db.list_relations("s").unwrap().len(), 1);
+    let provenance = db.get_extraction_provenance("s", &nonce).unwrap().unwrap();
+    assert_eq!(provenance.relations.len(), 1);
+    assert!(plan_extract(&db, "s", "m", S, None).unwrap().is_empty());
+}
+
+#[test]
+fn relation_properties_from_parsed_triples_are_persisted() {
+    let (_d, db) = db_with_chunks(1);
+    let unit = plan_extract(&db, "s", "m", S, None).unwrap().remove(0);
+    let result = ExtractResult {
+        chunk_id: unit.chunk_id,
+        model: unit.model,
+        provenance_nonce: unit.provenance_nonce.clone().unwrap(),
+        response: String::new(),
+    };
+    let triple = EntityInput {
+        head: "Alice".into(),
+        head_type: Some("Person".into()),
+        relation: "uses".into(),
+        tail: "GraphRAG".into(),
+        tail_type: Some("Software".into()),
+        properties: Some(serde_json::json!({"since": 2024})),
+    };
+    apply_extracted_entities(&db, "s", &result, &[triple]).unwrap();
+    let relations = db.list_relations("s").unwrap();
+    assert_eq!(relations.len(), 1);
+    let stored: serde_json::Value =
+        serde_json::from_str(relations[0].properties.as_deref().expect("properties kept")).unwrap();
+    assert_eq!(stored, serde_json::json!({"since": 2024}));
 }
 
 #[test]
