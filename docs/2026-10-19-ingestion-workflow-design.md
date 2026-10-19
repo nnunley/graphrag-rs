@@ -1,7 +1,7 @@
 # One memory graph: fingerprinted, incremental, self-driving ingestion
 
 **Date:** 2026-10-19
-**Status:** Draft for review (revision 2: one store, groups as graph nodes; builder check applied)
+**Status:** Draft for review (revision 3: one store, groups and sections as graph nodes; builder check applied)
 **Supersedes:** the orchestration parts of `docs/2026-06-20-enrichment-engine-design.md` (SP1). Builds on `docs/2026-08-11-paper-workflow-roadmap.md` (M2/M3 principles) and `docs/paper-contract-v1.md` (fingerprint encoding).
 
 ## Why
@@ -83,7 +83,8 @@ These would count as failures even if everything else worked:
 | Kind | What | Where it lives |
 |---|---|---|
 | Document | A note, paper, file or doc page; the unit that gets added | `documents` (content-addressed) |
-| Chunk | A token-bounded span of a document; the unit of embedding and extraction | `chunks` |
+| Section | A heading-delimited part of a document (markdown headings, nested by level). Notes without headings have none | `sections`, also an entity of type `section` |
+| Chunk | A token-bounded span inside one section (or inside a heading-less document); the unit of embedding and extraction | `chunks` |
 | Group | A named grouping: `papers`, `conversations`, `operation`, `mica-docs`, `9front-kb`, or any new one | an entity of type `collection` |
 | Entity | Something extracted from text: a person, software, concept, … | `entities` |
 
@@ -97,7 +98,8 @@ There are three kinds, depending on where an edge comes from.
 |---|---|---|---|---|
 | **Extracted** | `tokio -[used_by]-> moor` | extraction attempts (provenance) | support = number of distinct current attempts that found it | replaced on re-extraction; deleted when support reaches 0 |
 | **Asserted** | `paper.md -[part_of]-> papers`; `note 1802 -[subject]-> let-go` | an `assertions` record: who (Norman, Claude, migration, an ingest surface), when, and why (optional) | 1 per active assertion | stays until retracted; retraction sets `retracted_at` and keeps the record (the lace decision, 2026-08-16) |
-| **Derived** | `document -[mentions]-> entity` | computed from extraction: an entity was extracted from one of the document's chunks | number of the document's chunks that mention it | recomputed with extraction |
+| **Structural** | `paper.md -[has_part]-> "3 Methods" -[has_part]-> "3.1 GraphRAG Workflow" -[has_part]-> chunk 12` | parsed from the document when it's chunked | 1 | recomputed when the document is re-chunked |
+| **Derived** | `section -[mentions]-> entity` (and through it, the document) | computed from extraction: an entity was extracted from one of the document's chunks | number of the document's chunks that mention it | recomputed with extraction |
 
 ### Vocabulary
 
@@ -147,6 +149,14 @@ All fingerprints use the M0 encoding: `sha256:<hex>` from `token::fingerprint_pa
   - Notes have no `doc_key` and are append-only, matching brain: a correction is a new note, and an explicit `replaces` assertion is how one note retires another.
   - Without a key, nothing is auto-versioned. Adding text whose `content_fp` already exists creates no document. It records an add event (`document_adds`: document, source, surface, time) and asserts any new group edges. Adding the same text with the same groups is a no-op apart from the add event.
 - **Chunks** gain `document_id`, `start`, `end` (byte offsets from `chunker::chunk_spans` or the code chunker) and `content_fp`.
+- **Sections are nodes** (Norman, 2026-10-19):
+  - Markdown documents are parsed into a section tree from their headings: document `has_part` top-level sections, a section `has_part` its subsections, and a section `has_part` its chunks.
+  - Each section records its heading text, level, ordinal, heading path (`approval-workflow.md › Load the Workflow`), byte span, and `content_fp`.
+  - A document with no headings (most notes) has no sections; its chunks hang off the document directly.
+  - **Chunk boundaries never cross a section.** A section that fits in the chunk size is one chunk. A longer one is split with overlap inside that section only. Small adjacent sections are never merged.
+  - Text before the first heading forms an untitled leading section.
+  - Section identity across re-chunking: `(document, heading path, ordinal among same-path siblings)`. A section whose text is unchanged keeps its id and its chunks.
+  - Recall results show the chunk's heading path. Derived `mentions` edges attach to the section, so the graph shows which part of a document discusses an entity.
 - **Re-chunking:**
   - A document whose text didn't change is never re-chunked.
   - If the chunker profile changes, chunks whose `content_fp` still exists in the new split keep their id and all downstream state. New chunks are created. Chunks that disappeared are deleted along with their extractions and provenance links.
@@ -184,8 +194,9 @@ All fingerprints use the M0 encoding: `sha256:<hex>` from `token::fingerprint_pa
 - The Leiden edge weight between two nodes is the sum of:
   - the support of the extracted relations between them;
   - `asserted_weight` × the active asserted edges between them;
-  - `mention_weight` × the derived mention edges between them.
-- `asserted_weight` and `mention_weight` are community-config values, part of the community fingerprint (see "Clustering experiment").
+  - `mention_weight` × the derived mention edges between them;
+  - `structure_weight` × the structural `has_part` edges between them.
+- `asserted_weight`, `mention_weight` and `structure_weight` are community-config values, part of the community fingerprint (see "Clustering experiment").
 - *Builder's call:* whether to also scale by extracted strength. The default is no, matching the paper's use of instance counts.
 - Extracted relations and entities with zero current support and no asserted edges are deleted in the same transaction that removes their last support.
 - No stored weight column is required. If one is added as a cache, it must be recomputed in the same transaction as attempt changes. A test must show that forcing all weights to 1.0 fails (the roadmap M3 mutant).
@@ -197,7 +208,7 @@ All fingerprints use the M0 encoding: `sha256:<hex>` from `token::fingerprint_pa
 - One path for every surface: weighted hierarchical Leiden over the current graph, including isolates. It replaces both the CLI `enrich --levels` path and the unused `build_community_hierarchy`.
   - *Builder's call:* `leiden_hierarchical`'s downward subdivision with a fixed seed.
   - Subdivision stops when Leiden stops splitting, capped at 4 levels.
-- **Node set:** extracted entities always. Document and group nodes are included only when `mention_weight` or `asserted_weight` > 0.
+- **Node set:** extracted entities always. Document, section and group nodes are included only when one of `asserted_weight`, `mention_weight` or `structure_weight` is > 0.
 - A **community run** records `run_id, graph_fp, config (incl. asserted_weight, mention_weight), seed, created_at, modularity`. Communities belong to a run. The current run is replaced in one transaction (no left-over runs).
 - **When it runs:** when `graph_fp` differs from the current run's, and there's no ready chunk-level work. During a large backlog, the builder may rebuild at most once every N minutes so that escalated chunks show up in communities without a rebuild after every extraction. Failed and backing-off chunks don't count as ready work.
 - Membership never comes from the LLM.
@@ -206,8 +217,8 @@ All fingerprints use the M0 encoding: `sha256:<hex>` from `token::fingerprint_pa
 
 Norman wants to know whether group and document edges should shape clusters. Since the weights are config inputs to the run fingerprint, testing that needs no extra mechanism.
 
-- **Run 1:** `asserted_weight = 0`, `mention_weight = 0`. Text-only clusters; this is the default until the experiment decides.
-- **Run 2:** both weights moderate (*builder's call*, for example `asserted_weight = 1`, `mention_weight = 1`).
+- **Run 1:** `asserted_weight = 0`, `mention_weight = 0`, `structure_weight = 0`. Text-only clusters; this is the default until the experiment decides.
+- **Run 2:** all three moderate (*builder's call*, for example 1 each). If the two runs differ a lot, a third run isolating `structure_weight` shows whether sections or groups drive the difference.
 - **Compare:**
   - community size distribution and singleton share;
   - modularity;
@@ -364,7 +375,7 @@ All steps run on a copy first (rehearsal), then on live after a fresh backup.
    | Group | Live sources | Migration unit |
    |---|---|---|
    | `conversations` | 379 notes with `source='brain'`, 2 `prime-session:…`, 3 `let-go/…` | one document per chunk (each is a whole note) |
-   | `mica-docs` | 407 `path.md#Heading` sections from 54 files; 53 of the 54 exist under `~/development/mica` | re-import each found file as one document with `doc_key` = repo-relative path; the missing file's sections become one document per chunk |
+   | `mica-docs` | 407 `path.md#Heading` sections from 54 files; 53 of the 54 exist under `~/development/mica` | re-import each found file as one document with `doc_key` = repo-relative path; its headings become section nodes, which recovers today's 407 sections as nodes instead of losing them. The missing file's chunks become one document, with one section per old `#Heading` label |
    | `operation` | `lesson:…` records (one chunk each), repo docs labelled `project:doc#N` (`N` is an old chunker index), 1 `operational:…` | lessons: one document per chunk. Repo docs: re-import `~/development/<project>/docs/<doc>.md` (or the repo root `<doc>.md`) when it exists, as one document with `doc_key` = that path; otherwise group the chunks sharing a `project:doc` label, in `#N` order, into one document |
    | `9front-kb` | 3 chunks from a dry run | one document per chunk |
    | `papers` | `graphrag-paper` and `-dense` chunks, plus `operation`'s `graphrag-rs:microsoft-graphrag-paper#N` chunks | dropped; replaced by the re-import in step 7 |
@@ -393,6 +404,11 @@ All steps run on a copy first (rehearsal), then on live after a fresh backup.
 All without a live LLM unless noted. Release builds.
 
 - **Full pipeline:** a fake `ChatClient` with canned responses. The pipeline on a seeded graph reaches all-current, and a second run does zero work.
+- **Sections:**
+  - a markdown fixture yields the expected section tree and heading paths;
+  - no chunk crosses a section boundary, and small sections aren't merged;
+  - editing one section re-chunks and re-extracts only that section's chunks;
+  - heading-less notes get no sections.
 - **Content-addressing:** adding identical text twice yields one document and two add events. Adding it with a new group adds one edge. The text is never stored twice.
 - **Fingerprint invalidation:**
   - changing one paragraph re-extracts only the affected chunks;
