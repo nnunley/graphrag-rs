@@ -13,7 +13,7 @@
 
 **Tech Stack:** Rust 2024 workspace, rusqlite 0.32 (bundled), text-splitter 0.29 (markdown), ureq 2.12, sha2, the existing `leiden.rs`, fastembed (Nomic, 768-dim), llama.cpp `/v1/chat/completions`.
 
-**Spec:** `docs/2026-10-19-ingestion-workflow-design.md` (revision 3, approved by Norman 2026-10-19). Read it before every task. When this plan and the spec disagree, the spec wins; stop and report the conflict.
+**Spec:** `docs/2026-10-19-ingestion-workflow-design.md` (revision 4, approved by Norman 2026-10-19). Read it before every task. When this plan and the spec disagree, the spec wins; stop and report the conflict.
 
 ## Global Constraints
 
@@ -49,7 +49,7 @@
 | `graphrag-core/src/fingerprints.rs` (create) | one pure fn per step fingerprint |
 | `graphrag-core/src/sections.rs` (create) | markdown → section tree with byte spans |
 | `graphrag-core/src/chunk_plan.rs` (create) | section-bounded chunk planning |
-| `graphrag-core/src/nodes.rs` (create) | document/section/collection node rows |
+| `graphrag-core/src/nodes.rs` (create) | document/section/group node rows, `same_as` resolution |
 | `graphrag-core/src/assertions.rs` (create) | assert/retract edges with records |
 | `graphrag-core/src/documents.rs` (create) | content-addressed add, `doc_key` versioning, re-chunk identity |
 | `graphrag-core/src/status.rs` (create) | `step_status`, next-work query, escalation, report |
@@ -88,15 +88,15 @@ Core tests go in `graphrag-core/tests/<module>.rs`, one file per new module, ope
   - `pub fn Database::schema_version(&self) -> Result<i64, GraphRagError>`.
   - `pub(crate) fn Database::conn(&self) -> &Connection` for sibling modules.
 - v2 DDL created here (later tasks use these exact names):
-  - `documents(id, content, content_fp UNIQUE, doc_key, source, title, node_id, created_at)`
+  - `documents(id, content, content_fp UNIQUE, doc_key, origin TEXT NOT NULL DEFAULT 'source' CHECK(origin IN ('source','compiled')), source, title, node_id, created_at)`
   - `document_adds(id, document_id, source, surface, added_at)`
   - `sections(id, document_id, parent_id, heading, level, ordinal, heading_path, start, end, content_fp, node_id)`
   - `chunks` gains `document_id, section_id, start, end, content_fp`
-  - `assertions(id, head_id, relation, tail_id, asserter, reason, asserted_at, retracted_at)`
+  - `assertions(id, head_id, relation, tail_id, asserter, reason, context, asserted_at, retracted_at)`, where `context` is nullable
   - `step_status(subject_kind, subject_id, step, fp, state, attempts, last_error, next_try_at, priority, updated_at, PRIMARY KEY(subject_kind, subject_id, step))`
   - `attempts(attempt_fp PK, chunk_id, model, profile, prompt_version, schema_version, outcome, response_sha256, raw_response, unmapped_relations, rejected_entities, created_at)`
   - `attempt_entities(attempt_fp, entity_id, entity_type, description)`
-  - `attempt_relations(attempt_fp, relation_id, description, strength)`
+  - `attempt_relations(attempt_fp, relation_id, raw_relation, description, strength, evidence_kind, evidence_id)`, where evidence is `section` or `document`
   - `community_runs(run_id, graph_fp, config_json, seed, modularity, created_at, current)`
   - `communities` gains `run_id, fp`
   - `summaries(community_fp PK, summary, model, prompt_version, created_at)`
@@ -210,14 +210,15 @@ Core tests go in `graphrag-core/tests/<module>.rs`, one file per new module, ope
 
 **Interfaces:**
 - Produces:
-  - `pub enum NodeKind { Entity, Document, Section, Collection }`, stored in `entities.kind` as `entity|document|section|collection`.
-  - `pub fn Database::get_or_create_collection(&self, store: &str, name: &str) -> Result<i64, GraphRagError>`, which returns the node id and creates the row with `kind='collection'`, `entity_type='collection'`.
+  - `pub enum NodeKind { Entity, Document, Section, Group }`, stored in `entities.kind` as `entity|document|section|group`.
+  - `pub fn Database::get_or_create_group(&self, store: &str, name: &str) -> Result<i64, GraphRagError>`, which returns the node id and creates the row with `kind='group'`, `entity_type='group'`.
   - `pub fn Database::create_node(&self, store: &str, kind: NodeKind, name: &str) -> Result<i64, GraphRagError>`. Document and section names are unique per store via a `"doc:<fp-prefix>"` / `"sec:<id>"` naming scheme, so `UNIQUE(store, name)` keeps holding.
-  - `pub struct Asserter(pub String)`, using `"norman" | "claude" | "migration" | "cli" | "mcp"`.
-  - `pub fn Database::assert_edge(&self, head: i64, relation: &str, tail: i64, by: &Asserter, reason: Option<&str>) -> Result<i64, GraphRagError>`. This is idempotent while active: an identical active assertion returns the existing id.
+  - `pub struct Asserter(pub String)`, validated to `human:<name>` or `agent:<name>` (for example `human:norman`, `agent:claude`, `agent:migration`, `agent:cli`, `agent:mcp`, `agent:structure`). Anything else is `GraphRagError::InvalidInput`.
+  - `pub fn Database::assert_edge(&self, head: i64, relation: &str, tail: i64, by: &Asserter, reason: Option<&str>, context: Option<&str>) -> Result<i64, GraphRagError>`. This is idempotent while active: an identical active assertion returns the existing id.
   - `pub fn Database::retract_edge(&self, assertion_id: i64, by: &Asserter) -> Result<(), GraphRagError>`, which sets `retracted_at` and keeps the row.
   - `pub fn Database::active_assertions(&self, node: i64) -> Result<Vec<AssertionRecord>, GraphRagError>`.
-  - `pub fn Database::groups_of(&self, node: i64) -> Result<Vec<String>, GraphRagError>`, transitive `part_of` up through collections.
+  - `pub fn Database::groups_of(&self, node: i64) -> Result<Vec<String>, GraphRagError>`, transitive `part_of` up through groups. It's computed by a recursive query; no closure rows are stored.
+  - `pub fn Database::merge_as_same(&self, from: i64, into: i64, by: &Asserter) -> Result<i64, GraphRagError>`, which asserts `from -[same_as]-> into`. `pub fn Database::resolve_entity(&self, id: i64) -> Result<i64, GraphRagError>` follows active `same_as` chains to the representative, which is the end of the chain. A cycle is an error at assert time. `merge_entities` (db.rs:1366) becomes a thin wrapper over `merge_as_same`.
   - `pub fn Database::members_of_group(&self, store: &str, group: &str) -> Result<Vec<i64> /* document node ids, incl. subgroups */, GraphRagError>`.
 
 - [ ] **Step 1: Write the failing tests:**
@@ -225,11 +226,15 @@ Core tests go in `graphrag-core/tests/<module>.rs`, one file per new module, ope
   - `retract_keeps_record_and_hides_edge` (row exists with `retracted_at`; `active_assertions` excludes it);
   - `reassert_after_retract_creates_new_record`;
   - `groups_are_transitive` (doc `part_of` `graphrag`, `graphrag` `part_of` `papers` → `groups_of(doc)` = `{graphrag, papers}`);
-  - `document_in_two_groups`.
+  - `document_in_two_groups`;
+  - `asserter_must_be_prefixed`;
+  - `context_is_stored_and_optional`;
+  - `same_as_resolves_and_retract_unmerges` (after `merge_as_same(a, b)`, `resolve_entity(a) == b`; after retracting, `resolve_entity(a) == a`, and a's rows are intact);
+  - `same_as_cycle_rejected`.
 - [ ] **Step 2: Run** `cargo test --release -p graphrag-core --test assertions`. Expected: FAIL.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run.** Expected: PASS.
-- [ ] **Step 5: Commit** `feat(core): node kinds and retractable assertions`.
+- [ ] **Step 5: Commit** `feat(core): node kinds, retractable assertions and same_as merges`.
 
 ### Task 6: Content-addressed documents
 
@@ -238,16 +243,16 @@ Core tests go in `graphrag-core/tests/<module>.rs`, one file per new module, ope
 - Test: `graphrag-core/tests/documents.rs`
 
 **Interfaces:**
-- Consumes: `plan_chunks` (Task 4), `create_node`/`assert_edge`/`get_or_create_collection` (Task 5), `document_fp` (Task 2).
+- Consumes: `plan_chunks` (Task 4), `create_node`/`assert_edge`/`get_or_create_group` (Task 5), `document_fp` (Task 2).
 - Produces:
-  - `pub struct AddDocument<'a> { pub store: &'a str, pub content: &'a str, pub source: Option<&'a str>, pub doc_key: Option<&'a str>, pub title: Option<&'a str>, pub groups: &'a [&'a str], pub surface: &'a str, pub profile: &'a ChunkerProfile }`
+  - `pub struct AddDocument<'a> { pub store: &'a str, pub content: &'a str, pub origin: Origin /* Source | Compiled */, pub source: Option<&'a str>, pub doc_key: Option<&'a str>, pub title: Option<&'a str>, pub groups: &'a [&'a str], pub surface: &'a str, pub profile: &'a ChunkerProfile }`
   - `pub enum AddOutcome { Created { document_id: i64 }, Existing { document_id: i64, new_groups: usize }, Replaced { document_id: i64, replaced: i64 } }`
   - `pub fn Database::add_document(&self, req: &AddDocument) -> Result<AddOutcome, GraphRagError>`. One transaction does all of this:
     - inserts or reuses the document;
     - records a `document_adds` row;
-    - asserts `part_of` to each group (asserter = `surface`);
+    - asserts `part_of` to each group (asserter = `agent:<surface>`);
     - on a `doc_key` match with different content, creates the new document and asserts `new -[replaces]-> old`;
-    - writes the sections (with section nodes and structural `has_part` edges stored as assertions with asserter `"structure"`) and the chunks with `document_id`/`section_id`/`start`/`end`/`content_fp`;
+    - writes the sections (with section nodes and structural `has_part` edges stored as assertions with asserter `agent:structure`) and the chunks with `document_id`/`section_id`/`start`/`end`/`content_fp`;
     - sets `step_status(document, id, "chunk")` to `current` with `chunk_plan_fp`.
   - `pub fn Database::rechunk_document(&self, document_id: i64, profile: &ChunkerProfile) -> Result<RechunkReport, GraphRagError>`. A chunk whose `content_fp` is still in the new plan keeps its id. New chunks are inserted, and chunks that disappeared are deleted (cascading their attempts, links and status). `pub struct RechunkReport { kept: usize, added: usize, removed: usize }`.
   - `pub fn Database::active_documents(&self, store: &str) -> ...`, which excludes documents that are the tail of an active `replaces` assertion.
@@ -260,7 +265,8 @@ Core tests go in `graphrag-core/tests/<module>.rs`, one file per new module, ope
   - `notes_without_key_never_replace` (two different notes, both active);
   - `sections_become_nodes_with_has_part_edges` (fixture `# A\n## B\ntext` → document `has_part` A, A `has_part` B, B `has_part` chunk);
   - `rechunk_keeps_ids_of_unchanged_chunks` (change the profile overlap; chunks of untouched sections keep ids);
-  - `empty_note_is_rejected`.
+  - `empty_note_is_rejected`;
+  - `compiled_origin_is_stored`.
 - [ ] **Step 2: Run** `cargo test --release -p graphrag-core --features code --test documents`. Expected: FAIL.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run.** Expected: PASS.
@@ -302,7 +308,8 @@ Core tests go in `graphrag-core/tests/<module>.rs`, one file per new module, ope
   - `communities_wait_for_chunk_work`;
   - `failed_chunks_do_not_block_communities`;
   - `report_counts_per_group` (two groups, one stale chunk in one);
-  - `complete_means_no_missing_or_stale` (one failed item → `is_complete()` still true).
+  - `complete_means_no_missing_or_stale` (one failed item → `is_complete()` still true);
+  - `compiled_documents_are_not_extracted` (a compiled document's chunks get embed work but no extract work, and don't count as missing extraction).
 - [ ] **Step 2: Run** `cargo test --release -p graphrag-core --test status`. Expected: FAIL.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run** the suite, plus `cargo test --release -p graphrag-core --test mr_contract`. Expected: PASS.
@@ -324,13 +331,17 @@ Core tests go in `graphrag-core/tests/<module>.rs`, one file per new module, ope
   - `pub fn normalize_entity_name(raw: &str) -> String`: trim, collapse internal whitespace, case-fold for the key while keeping the display case of the first seen.
 - Vocabulary changes:
   - add `("about", "subject")`, `("topic_of", "subject")` and the canonical `subject`;
-  - add the canonical type `collection`, plus `section` and `document` kinds;
-  - remove the `("collection", "dataset")` synonym.
+  - split `type_of` (synonyms.rs:83-86): `is_a`, `instance_of` → `isa`; `kind_of`, `subclass_of`, `subtype_of` → `genls`. `type_of` itself maps to `isa`;
+  - add the canonicals `disjoint_with`, `links_to` and `same_as` (reserved; no enforcement yet);
+  - add the canonical type `group`, plus `section` and `document` kinds;
+  - remove the `("collection", "dataset")` synonym. `collection` becomes a canonical type in the Cyc sense (concept class).
 
 - [ ] **Step 1: Write the failing tests:**
   - `synonyms_map_to_one_canonical` (`utilizes`/`leverages`/`uses` → `uses`);
   - `subject_is_canonical`;
-  - `collection_is_its_own_type`;
+  - `group_is_its_own_type` and `collection_is_not_dataset`;
+  - `isa_and_genls_are_distinct` (`instance_of` → `isa`, `kind_of` → `genls`);
+  - `reserved_relations_are_canonical` (`disjoint_with`, `links_to`, `same_as`);
   - `unknown_relation_is_unmapped`;
   - `spelling_variants_merge` (Review Focus 4: `GraphRAG`, `graphrag `, `GRAPHRAG` → the same key; `get_or_create_entity` returns one id for all three).
 - [ ] **Step 2: Run** `cargo test --release -p graphrag-core --test vocabulary`. Expected: FAIL.
@@ -360,12 +371,14 @@ Core tests go in `graphrag-core/tests/<module>.rs`, one file per new module, ope
     - GCs entities and relations with zero current support and no assertions;
     - records `step_status(chunk, extract) = Current(attempt_fp)`.
   - `pub struct CommitReport { pub replay: bool, pub superseded: Option<String>, pub entities: usize, pub relations: usize, pub unmapped_relations: usize, pub implicit_endpoints: usize, pub gc_entities: usize, pub gc_relations: usize }`
-  - `pub fn Database::relation_support(&self, relation_id: i64) -> Result<usize, GraphRagError>`, the count of distinct current attempts.
+  - `pub fn Database::relation_support(&self, relation_id: i64) -> Result<usize, GraphRagError>`, the count of distinct evidence units (the section of the chunk, or its document when it has no sections) that have a current attempt linking the relation. Each `attempt_relations` row records `raw_relation` (the model's name, before normalization) and its evidence unit.
   - `pub fn Database::canonical_entity_type(&self, entity_id: i64) -> Result<String, GraphRagError>`, the majority over current instances with the newest winning ties.
 - The old `persist_extraction`, `extractions`, `extraction_entities` and `extraction_relations` are dropped from the write path. Keep the tables only until Task 19 deletes them.
 
 - [ ] **Step 1: Write the failing tests:**
-  - `two_chunks_one_relation_support_two`;
+  - `two_sections_one_relation_support_two`;
+  - `overlapping_chunks_in_one_section_support_one`;
+  - `raw_relation_kept_beside_canonical` (`utilizes` is stored raw and counted toward `uses`);
   - `synonym_relations_share_support`;
   - `identical_replay_is_noop`;
   - `superseding_removes_old_support`;
@@ -430,11 +443,13 @@ Core tests go in `graphrag-core/tests/<module>.rs`, one file per new module, ope
   - list the canonical entity types (`entity_types.rs`) and relations (`synonyms.rs::canonical_relations()`);
   - "tools, version-control systems, libraries and AI models are Software, never Person";
   - "ignore illustrative example names (e.g. alice, bob, foo) and bibliographic citations";
-  - "prefer a specific relation; use associated_with only when nothing else fits".
+  - "prefer a specific relation; use associated_with only when nothing else fits";
+  - "use isa when something is an instance of a kind, genls when one kind is a more specific kind of another".
 
 - [ ] **Step 1: Write the failing tests:**
   - `prompt_lists_canonical_vocabulary`;
   - `prompt_contains_software_and_example_rules`;
+  - `prompt_distinguishes_isa_from_genls`;
   - `parses_spike_arm_c_output` (fixture: copy one arm-C JSON from a spike run into `graphrag-llm/tests/fixtures/arm_c_1212.json`);
   - `empty_lists_are_empty_outcome`;
   - `broken_json_is_err`;
@@ -457,14 +472,16 @@ Core tests go in `graphrag-core/tests/<module>.rs`, one file per new module, ope
   - `pub struct Projection { pub graph: CommunityGraph, pub edges: Vec<(i64, i64, f64)>, pub isolates: Vec<i64> }`
   - `pub fn Database::project_graph(&self, store: &str, cfg: &CommunityConfig) -> Result<Projection, GraphRagError>`:
     - The weight between two nodes is the sum of the support of the extracted relations between them, plus `asserted_weight` × the active non-structural assertions, plus `mention_weight` × the derived mentions, plus `structure_weight` × the structural `has_part` assertions. Edges are undirected for Leiden.
-    - Node set: `kind='entity'` always. Document, section and collection nodes are included only if the relevant weight is > 0.
+    - Node set: `kind='entity'` always. Document, section and group nodes are included only if the relevant weight is > 0.
+    - Every node id is passed through `resolve_entity` first, so `same_as` merges contract to one node.
     - Retracted assertions are excluded.
 
 - [ ] **Step 1: Write the failing tests:**
   - `weight_equals_support`;
   - `forcing_unit_weights_fails` (the roadmap M3 mutant: a test-only `cfg` hook `force_unit_weights=true` must make `weight_equals_support` fail; assert the projected weight is 3.0, not 1.0, for a 3-attempt relation);
   - `zero_weights_exclude_structural_nodes`;
-  - `asserted_weight_reaches_adjacency` (spy: an edge with weight `asserted_weight` appears between doc and collection);
+  - `asserted_weight_reaches_adjacency` (spy: an edge with weight `asserted_weight` appears between doc and group);
+  - `same_as_contracts_nodes` (two merged entities project as one node carrying both nodes' edges);
   - `retracted_assertion_not_projected`;
   - `isolates_included`.
 - [ ] **Step 2: Run** `cargo test --release -p graphrag-core --test weights`. Expected: FAIL.
@@ -706,13 +723,15 @@ Core tests go in `graphrag-core/tests/<module>.rs`, one file per new module, ope
 This task is operational: no new product code. **Live steps need Norman's explicit go-ahead at the marked gates.**
 
 **Files:**
-- Modify: `scripts/extraction-spike/run.py` (add arms `C_prod` and `V11_prod`: production chunker, arm-C prompt vs `paper-json-v1.1`; merge pieces per original chunk in `pack.py`)
+- Modify: `scripts/extraction-spike/run.py` (add arms `C_prod`, `V11_prod` and `V11_small`: production chunker (2,000/200), arm-C prompt vs `paper-json-v1.1`, plus `paper-json-v1.1` at 1,000/100; merge pieces per original chunk in `pack.py`)
 - Create: `docs/2026-10-2x-ingestion-rollout-log.md` (counts, timings, judge scores, both clustering runs)
 
 - [ ] **Step 1: Re-spike.** Run the harness per `scripts/extraction-spike/README.md` with both judges (Codex `-m gpt-6-sol`). Gate:
   - `V11_prod` ≥ `C_prod` on both judges;
   - no `jj` or `Opus` typed Person;
-  - no citation or example-handle entities.
+  - no citation or example-handle entities;
+  - `isa`/`genls` used correctly in the sampled outputs;
+  - pick the chunk size: if `V11_small` beats `V11_prod` on both judges by more than 1 point, switch `ChunkerProfile::default_markdown()` to 1,000/100 before the rehearsal (and note the doubled call count).
 
   If the gate fails, fix the prompt, bump `PROMPT_VERSION`, and repeat. Record the scores in the rollout log.
 - [ ] **Step 2: Rehearsal on a copy:**
@@ -720,7 +739,8 @@ This task is operational: no new product code. **Live steps need Norman's explic
   - `GRAPHRAG_DATA_DIR=<scratch> graphrag migrate v2 --plan --repo-root ~/development/mica`. Expected: zero unresolved, and per-group counts that match the spec's table;
   - `--apply`, then `graphrag work --accept-reextract` until exit 0;
   - `graphrag status` shows complete;
-  - record wall time, attempt count, failed count, community count, singleton share, and cross-group communities.
+  - record wall time, attempt count, failed count, community count, singleton share, and cross-group communities;
+  - homonym probe: for about 20 hand-picked generic names (worker, status, store, database, index, queue, …), list each resolved entity's groups and top relations, and count wrong cross-project merges.
 - [ ] **Step 3: Show Norman the rehearsal numbers. GATE: wait for approval before touching live.**
 - [ ] **Step 4: Live:**
   - fresh backup to `backups/<date>-pre-v2/`;

@@ -1,7 +1,7 @@
 # One memory graph: fingerprinted, incremental, self-driving ingestion
 
 **Date:** 2026-10-19
-**Status:** Draft for review (revision 3: one store, groups and sections as graph nodes; builder check applied)
+**Status:** Draft for review (revision 4: one store, groups and sections as graph nodes; research decisions from 2026-10-19 applied)
 **Supersedes:** the orchestration parts of `docs/2026-06-20-enrichment-engine-design.md` (SP1). Builds on `docs/2026-08-11-paper-workflow-roadmap.md` (M2/M3 principles) and `docs/paper-contract-v1.md` (fingerprint encoding).
 
 ## Why
@@ -85,7 +85,7 @@ These would count as failures even if everything else worked:
 | Document | A note, paper, file or doc page; the unit that gets added | `documents` (content-addressed) |
 | Section | A heading-delimited part of a document (markdown headings, nested by level). Notes without headings have none | `sections`, also an entity of type `section` |
 | Chunk | A token-bounded span inside one section (or inside a heading-less document); the unit of embedding and extraction | `chunks` |
-| Group | A named grouping: `papers`, `conversations`, `operation`, `mica-docs`, `9front-kb`, or any new one | an entity of type `collection` |
+| Group | A named grouping: `papers`, `conversations`, `operation`, `mica-docs`, `9front-kb`, or any new one | an entity of type `group` |
 | Entity | Something extracted from text: a person, software, concept, … | `entities` |
 
 Documents and groups take part in the graph as entities, so every edge connects two entity rows. A document's entity row is linked 1:1 to its `documents` row and has type `document`. *Builder's call:* whether documents become entity rows or the edge table becomes polymorphic. Either way, edges between any two node kinds must work and be queryable the same way.
@@ -97,7 +97,7 @@ There are three kinds, depending on where an edge comes from.
 | Kind | Example | Source of truth | Weight | Lifecycle |
 |---|---|---|---|---|
 | **Extracted** | `tokio -[used_by]-> moor` | extraction attempts (provenance) | support = number of distinct current attempts that found it | replaced on re-extraction; deleted when support reaches 0 |
-| **Asserted** | `paper.md -[part_of]-> papers`; `note 1802 -[subject]-> let-go` | an `assertions` record: who (Norman, Claude, migration, an ingest surface), when, and why (optional) | 1 per active assertion | stays until retracted; retraction sets `retracted_at` and keeps the record (the lace decision, 2026-08-16) |
+| **Asserted** | `paper.md -[part_of]-> papers`; `note 1802 -[subject]-> let-go` | an `assertions` record: who (actor-prefixed: `human:norman`, `agent:claude`, `agent:migration`, `agent:cli`, `agent:mcp`, matching OKF v0.2 provenance), when, why (optional), and an optional **context** (nullable; reserved for Cyc-style microtheories and context-scoped visibility) | 1 per active assertion | stays until retracted; retraction sets `retracted_at` and keeps the record (the lace decision, 2026-08-16) |
 | **Structural** | `paper.md -[has_part]-> "3 Methods" -[has_part]-> "3.1 GraphRAG Workflow" -[has_part]-> chunk 12` | parsed from the document when it's chunked | 1 | recomputed when the document is re-chunked |
 | **Derived** | `section -[mentions]-> entity` (and through it, the document) | computed from extraction: an entity was extracted from one of the document's chunks | number of the document's chunks that mention it | recomputed with extraction |
 
@@ -111,7 +111,9 @@ Use the canonical vocabulary in `graphrag-core/src/synonyms.rs` and `entity_type
   - A changed document is a new document node that `replaces` the old one (Dublin Core replaces/isReplacedBy).
   - The old document's chunks drop out of active retrieval and extraction, but the node and edge remain.
   - `version_of` is for editions of external works.
-- **Type fix:** add a canonical `collection` entity type for groups. The type table currently maps "collection" to `dataset`; that synonym is removed.
+- **Type fix:** add a canonical `group` entity type for groupings. `collection` is reserved for the Cyc sense (a concept class whose instances share a nature), so the `collection → dataset` synonym is removed and `collection` is not used for groups.
+- **`isa` and `genls` are distinct** (Cyc; see the wiki's `concepts/cyc-ontology-mechanics`). `isa` is an individual being an instance of a collection ("graphrag-rs isa software project"). `genls` is one collection generalizing another ("Rust crate genls software library"). The old `type_of` canonical, with synonyms `is_a`, `instance_of` and `kind_of`, is split: `is_a`/`instance_of` → `isa`; `kind_of`/`subclass_of`/`subtype_of` → `genls`. The extraction prompt asks the model to choose explicitly.
+- **Reserved now, enforced later:** `disjoint_with` (two collections share no instances; later a merge guard) and `links_to` (an untyped link from a markdown or OKF import, so imports don't invent meaning).
 - **Extraction uses the vocabulary:**
   - The extraction prompt lists the canonical relations and asks the model to use them where they fit.
   - Responses are normalized through the synonym table.
@@ -142,7 +144,8 @@ All fingerprints use the M0 encoding: `sha256:<hex>` from `token::fingerprint_pa
 
 ### Documents (step 0) and chunking (step 1)
 
-- **`documents`:** `id, content, content_fp UNIQUE, doc_key?, source, title?, created_at`.
+- **`documents`:** `id, content, content_fp UNIQUE, doc_key?, origin, source, title?, created_at`.
+- **`origin`** is `source` (a note, a paper, a doc page: something that states things first-hand) or `compiled` (a wiki page or other synthesis of other sources). Compiled documents are chunked, embedded and searchable, but **not extracted**: their claims would double-count the sources they summarize. They connect to their sources through asserted `references`/`links_to` edges.
 - **Document identity across edits** (*Claude's call*):
   - A document has an optional caller-supplied `doc_key`: a file path for files, a page id for imported docs.
   - Adding new text under an existing `doc_key` creates a new document that `replaces` the previous one with that key.
@@ -162,7 +165,7 @@ All fingerprints use the M0 encoding: `sha256:<hex>` from `token::fingerprint_pa
   - If the chunker profile changes, chunks whose `content_fp` still exists in the new split keep their id and all downstream state. New chunks are created. Chunks that disappeared are deleted along with their extractions and provenance links.
 - **Every write surface goes through this path:** CLI `note` (which today stores a whole note as one chunk), MCP `add_document`/`add_code`, Nushell `add` and Python.
 - **Chunk size** (*Claude's call*): 2,000 characters with 200 overlap, markdown-aware. That's about 500 tokens, close to the paper's 600/100. A hard cap guarantees that no chunk sent to the LLM exceeds that size. `add_code` uses `code_chunker`, and the chunker kind is part of the fingerprint.
-- **`graphrag note`** takes optional `--group <name>` (repeatable) and defaults to `conversations`. A group named for the first time is created as a `collection` node.
+- **`graphrag note`** takes optional `--group <name>` (repeatable) and defaults to `conversations`. A group named for the first time is created as a `group` node.
 
 ### Embed (step 2)
 
@@ -190,7 +193,7 @@ All fingerprints use the M0 encoding: `sha256:<hex>` from `token::fingerprint_pa
 
 ### Weights (step 4, derived)
 
-- `support(extracted relation)` = count of distinct current attempts that link it.
+- `support(extracted relation)` = the number of distinct **evidence units** with a current attempt that links it. An evidence unit is a section, or the document when it has no sections (*Claude's call*). One relation found in two overlapping chunks of the same section counts once: the LLM doesn't report where in a chunk it found a relation, so overlap can't be de-duplicated by position. Counting by section keeps repetition across sections and documents, which is the paper's signal, and removes the overlap double-count.
 - The Leiden edge weight between two nodes is the sum of:
   - the support of the extracted relations between them;
   - `asserted_weight` × the active asserted edges between them;
@@ -317,7 +320,7 @@ Norman wants to know whether group and document edges should shape clusters. Sin
   - prefer specific relations over `associated_with`.
 - **The corrected prompt is re-spiked before the live run** (*Claude's call*), with `scripts/extraction-spike/` (committed).
   - Inputs: the same 12 source chunks re-cut with the production chunker (2,000/200). Each judge packet is the original chunk with the extractions of all its pieces merged, so quality and timing are measured at production size.
-  - Arms: arm C (old prompt) versus the corrected prompt, both at production size.
+  - Arms: arm C (old prompt) versus the corrected prompt, both at production size, plus the corrected prompt at a smaller chunk size (about 1,000 characters). The GraphRAG paper's Fig. 3 shows smaller chunks surfacing more entities, and chunk size is part of every fingerprint, so this is the last cheap moment to choose it.
   - Judges: a fresh Claude subagent and Codex `-m gpt-6-sol`. Codex is available; its configured default model isn't.
   - Gate: the corrected prompt scores at least as well as arm C on both judges, `jj` and `Opus` aren't typed Person, and no citation or example-handle entities appear.
 
@@ -380,7 +383,7 @@ All steps run on a copy first (rehearsal), then on live after a fresh backup.
    | `9front-kb` | 3 chunks from a dry run | one document per chunk |
    | `papers` | `graphrag-paper` and `-dense` chunks, plus `operation`'s `graphrag-rs:microsoft-graphrag-paper#N` chunks | dropped; replaced by the re-import in step 7 |
 
-   - Each document gets an asserted `part_of` edge (asserter `migration`) to its old store's group.
+   - Each document gets an asserted `part_of` edge (asserter `agent:migration`) to its old store's group.
    - Content-addressing collapses any identical text.
    - Before running, the migration prints per group: documents re-imported from files, documents assembled from chunk groups, single-chunk documents, unresolved labels. The rehearsal must show zero unresolved labels.
 7. **The paper:**
@@ -391,7 +394,8 @@ All steps run on a copy first (rehearsal), then on live after a fresh backup.
    - zero missing or stale steps;
    - the atlas shows varied weights;
    - communities are no longer mostly singletons;
-   - at least one community spans `papers` and `conversations` through shared entities.
+   - at least one community spans `papers` and `conversations` through shared entities;
+   - **homonym probe:** about 20 hand-picked generic names (worker, status, store, database, …) are checked for wrong cross-project merges, and the count goes in the rollout log.
 10. **Clustering run 2 and comparison;** Norman picks the default.
 11. **Surface switch:**
     - `--in <group>` is the scope everywhere (*Claude's call*). `--store`/`store` stays accepted for one release as a deprecated alias for `--in`, with a warning.
@@ -430,6 +434,29 @@ All without a live LLM unless noted. Release builds.
 - **LLM client:** `OpenAiChatClient` against a mock HTTP server, including the json_schema and thinking flags.
 - **Live rehearsal** on a DB copy against llama.cpp before touching live.
 - Paper M2/M3 gated capabilities stay gated unless their binding tests are actually met; this design delivers parts of both.
+
+## Research decisions (revision 4, 2026-10-19)
+
+From a research pass over the GraphRAG paper, recent LLM knowledge-graph construction papers (AutoSchemaKG, EDC, KGGen, a 2025 survey), OpenCyc, and OKF v0.2. Filed in Norman's wiki: `ideas/memory-graph-construction-research.md` and the pages it links. Norman approved folding these in.
+
+1. `isa` and `genls` are split (see "Vocabulary"), and the extraction prompt chooses between them.
+2. Groups are `group`, not `collection` (see "Vocabulary").
+3. Assertions carry an optional context (see "Edges").
+4. **Entity merges and same-as are assertions.** Merging A into B asserts `A -[same_as]-> B` (asserter recorded). Reads and the Leiden projection resolve `same_as` chains to one representative. Retracting the assertion un-merges without data loss. The existing `merge_entities` row rewrite is replaced.
+5. **Each extraction instance keeps the raw relation name and description** next to the canonical relation, so a later definition-based canonicalizer (EDC-style) can run without re-extraction.
+6. `disjoint_with` and `links_to` are reserved vocabulary (see "Vocabulary").
+7. Asserters are actor-prefixed (see "Edges").
+8. Documents carry `origin` (`source` or `compiled`); compiled ones aren't extracted (see "Documents").
+9. The re-spike compares two chunk sizes, and the rehearsal runs a homonym probe (see "Extraction profile" and "Migration").
+10. Support counts distinct evidence units (sections), not chunks (see "Weights").
+
+Deferred, but the schema doesn't block them:
+- Cyc default/monotonic assertion strength;
+- closure rules (subgroups, `genls` chains) computed as queries;
+- EDC-style canonicalization;
+- an upper-ontology concept layer, kept out of default clustering;
+- wiki export (index and log as generated views, summaries as compiled artifacts);
+- a hand-labeled evaluation set.
 
 ## Data cleanup (approved and done 2026-10-19)
 
