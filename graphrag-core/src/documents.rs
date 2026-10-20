@@ -95,9 +95,15 @@ impl Database {
         self.get_store(req.store)?;
         let by = Asserter::new(&format!("agent:{}", req.surface))?;
         let fp = document_fp(req.content);
-        let tx = self.conn().unchecked_transaction()?;
+        // Join an enclosing transaction (the v2 migration) instead of nesting.
+        let tx = if self.conn().is_autocommit() {
+            Some(self.conn().unchecked_transaction()?)
+        } else {
+            None
+        };
+        let conn = self.conn();
 
-        let existing: Option<i64> = tx
+        let existing: Option<i64> = conn
             .query_row(
                 "SELECT id FROM documents WHERE content_fp = ?1",
                 params![fp],
@@ -134,7 +140,7 @@ impl Database {
                 Some(key) => self.latest_active_by_key(req.store, key)?,
                 None => None,
             };
-            tx.execute(
+            conn.execute(
                 "INSERT INTO documents (content, content_fp, doc_key, origin, source, title)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
@@ -146,7 +152,7 @@ impl Database {
                     req.title
                 ],
             )?;
-            let document_id = tx.last_insert_rowid();
+            let document_id = conn.last_insert_rowid();
             let node = self.ensure_document_node(document_id, req.store, &fp)?;
             for g in req.groups {
                 let gid = self.get_or_create_group(req.store, g)?;
@@ -177,11 +183,13 @@ impl Database {
             | AddOutcome::Existing { document_id, .. }
             | AddOutcome::Replaced { document_id, .. } => document_id,
         };
-        tx.execute(
+        conn.execute(
             "INSERT INTO document_adds (document_id, source, surface) VALUES (?1, ?2, ?3)",
             params![document_id, req.source, req.surface],
         )?;
-        tx.commit()?;
+        if let Some(tx) = tx {
+            tx.commit()?;
+        }
         Ok(outcome)
     }
 

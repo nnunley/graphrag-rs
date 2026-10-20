@@ -91,6 +91,9 @@ pub mod chunk_plan;
 #[cfg(feature = "chunking")]
 pub mod documents;
 
+#[cfg(feature = "chunking")]
+pub mod migrate_v2;
+
 #[cfg(feature = "code")]
 pub mod code_chunker;
 

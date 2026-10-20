@@ -92,6 +92,11 @@ enum Commands {
         #[arg(long)]
         resume: bool,
     },
+    /// One-time migrations
+    Migrate {
+        #[command(subcommand)]
+        what: MigrateCmd,
+    },
     /// Deprecated alias for `work`
     Enrich {
         #[arg(long, hide = true)]
@@ -196,6 +201,31 @@ enum Commands {
         /// Store name
         #[arg(long)]
         store: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum MigrateCmd {
+    /// Merge the old stores into one graph with groups and sections
+    V2 {
+        /// Show what would happen (read-only)
+        #[arg(long)]
+        plan: bool,
+        /// Do it (in one transaction; refuses on unresolved sources)
+        #[arg(long)]
+        apply: bool,
+        /// Root of the mica repo (mica-docs sources)
+        #[arg(long)]
+        repo_root: Option<PathBuf>,
+        /// Directory holding project repos (operation sources)
+        #[arg(long)]
+        dev_root: Option<PathBuf>,
+        /// The GraphRAG paper to import into `papers`
+        #[arg(long)]
+        paper: Option<PathBuf>,
+        /// Print the plan or report as JSON
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -623,6 +653,80 @@ fn cmd_provenance(store: &str, nonce: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn cmd_migrate_v2(
+    plan_only: bool,
+    apply: bool,
+    repo_root: Option<PathBuf>,
+    dev_root: Option<PathBuf>,
+    paper: Option<PathBuf>,
+    json: bool,
+) -> Result<(), String> {
+    use graphrag_core::migrate_v2::{MigrationSources, apply_v2_migration, plan_v2};
+    if plan_only == apply {
+        return Err("pass exactly one of --plan or --apply".into());
+    }
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let dev_root = dev_root.unwrap_or_else(|| home.join("development"));
+    let (embedder_id, dim) = embedder_identity();
+    let sources = MigrationSources {
+        mica_root: repo_root.unwrap_or_else(|| dev_root.join("mica")),
+        paper_path: paper
+            .unwrap_or_else(|| dev_root.join("graphrag-rs/docs/microsoft-graphrag-paper.md")),
+        dev_root,
+        embedder_id,
+        dim,
+    };
+    let db = open_db()?;
+    let plan = plan_v2(&db, &sources).map_err(|e| format!("plan: {e}"))?;
+    if plan_only {
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&plan).map_err(|e| e.to_string())?
+            );
+        } else {
+            println!(
+                "{:<16} {:>10} {:>12} {:>8}",
+                "GROUP", "FROM FILES", "FROM CHUNKS", "SINGLE"
+            );
+            for (g, p) in &plan.per_group {
+                println!(
+                    "{g:<16} {:>10} {:>12} {:>8}",
+                    p.from_files, p.from_chunk_groups, p.single_chunk
+                );
+            }
+            let d = &plan.deletions;
+            println!(
+                "\ndelete: {} entities, {} relations, {} communities, {} extraction checkpoints; replace {} chunks ({} paper copies dropped)",
+                d.entities, d.relations, d.communities, d.extractions, d.chunks, d.paper_chunks
+            );
+            println!("unresolved: {}", plan.unresolved.len());
+            for u in &plan.unresolved {
+                println!("  {u}");
+            }
+        }
+        return Ok(());
+    }
+    let report = apply_v2_migration(&db, &plan, &sources).map_err(|e| format!("apply: {e}"))?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
+        );
+    } else {
+        println!(
+            "migrated: {} documents, {} chunks, {} sections; {} embeddings re-attached; {} old documents removed",
+            report.documents,
+            report.chunks,
+            report.sections,
+            report.embeddings_reattached,
+            report.deleted_documents
+        );
+        println!("next: graphrag work --accept-reextract");
+    }
+    Ok(())
+}
+
 /// The embedder's identity and dimension, from the same environment
 /// `open_embedder` reads, without loading the model.
 fn embedder_identity() -> (String, usize) {
@@ -727,6 +831,17 @@ fn main() -> ExitCode {
                 resume,
             );
         }
+        Commands::Migrate {
+            what:
+                MigrateCmd::V2 {
+                    plan,
+                    apply,
+                    repo_root,
+                    dev_root,
+                    paper,
+                    json,
+                },
+        } => cmd_migrate_v2(plan, apply, repo_root, dev_root, paper, json),
         Commands::Enrich { .. } => {
             eprintln!("warning: `enrich` is deprecated; use `graphrag work`");
             return cmd_work(
