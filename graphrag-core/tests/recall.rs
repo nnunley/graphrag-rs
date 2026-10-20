@@ -162,3 +162,44 @@ fn step_fp_reads_status() {
         Some(("sha256:abc".to_string(), "current".to_string()))
     );
 }
+
+#[test]
+fn hybrid_recall_fuses_scopes_and_labels() {
+    let f = fx();
+    let (_, a) = f.doc("# Topic\nquokka habitats in papers", &["papers"]);
+    let (_, b) = f.doc("quokka habitats in chat", &["conversations"]);
+    f.db.set_chunk_embedding(a[0], &[1.0, 0.0, 0.0]).unwrap();
+    f.db.set_chunk_embedding(b[0], &[0.9, 0.1, 0.0]).unwrap();
+    let now = "2026-10-20T12:00:00.000Z";
+    let all =
+        f.db.hybrid_recall(
+            STORE,
+            "quokka habitats topic papers",
+            &[1.0, 0.0, 0.0],
+            &[],
+            5,
+            None,
+            now,
+        )
+        .unwrap();
+    assert_eq!(all.len(), 2);
+    assert_eq!(all[0].chunk_id, a[0]);
+    assert!(all[0].vec.is_some() && all[0].lex.is_some());
+    assert_eq!(all[0].groups, vec!["papers".to_string()]);
+    assert_eq!(all[0].heading_path, vec!["Topic".to_string()]);
+    let scoped =
+        f.db.hybrid_recall(
+            STORE,
+            "quokka habitats",
+            &[1.0, 0.0, 0.0],
+            &["conversations"],
+            5,
+            None,
+            now,
+        )
+        .unwrap();
+    assert_eq!(
+        scoped.iter().map(|h| h.chunk_id).collect::<Vec<_>>(),
+        vec![b[0]]
+    );
+}

@@ -4,9 +4,37 @@
 
 use crate::db::Database;
 use crate::error::GraphRagError;
+use crate::lexical::LexicalIndex;
 use crate::salience::UseKind;
+use crate::vector_source::{BruteForceVectorSource, VectorCandidateSource};
 use rusqlite::params;
 use std::collections::{BTreeMap, HashMap, HashSet};
+
+use leit_fusion::fuse_default;
+
+/// One fused recall result.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecallHit {
+    pub chunk_id: i64,
+    pub rrf: f64,
+    /// Cosine similarity, when the vector lane found it.
+    pub vec: Option<f32>,
+    /// BM25 score, when the lexical lane found it.
+    pub lex: Option<f32>,
+    /// Expansion score, when the graph lane found it.
+    pub graph: Option<f64>,
+    pub created_at: String,
+    pub source: Option<String>,
+    pub groups: Vec<String>,
+    pub heading_path: Vec<String>,
+    pub content: String,
+}
+
+fn ranked(ids: impl Iterator<Item = i64>) -> Vec<leit_fusion::RankedResult> {
+    ids.enumerate()
+        .map(|(i, id)| leit_fusion::RankedResult::new(id.to_string(), i + 1))
+        .collect()
+}
 
 /// `(groups, heading path)` of a chunk.
 pub type ChunkLabel = (Vec<String>, Vec<String>);
@@ -132,5 +160,116 @@ impl Database {
             out.insert(*id, (groups, ctx.heading_path));
         }
         Ok(out)
+    }
+
+    /// Hybrid recall: exact cosine and BM25 over eligible chunks (active
+    /// documents, optionally scoped to `groups`), fused with RRF, then a
+    /// third lane that follows shared entities from the best half of those
+    /// hits. `lexical` is a prebuilt index over the whole store (a cache);
+    /// without one, an index over the eligible chunks is built here.
+    #[allow(clippy::too_many_arguments)]
+    pub fn hybrid_recall(
+        &self,
+        store: &str,
+        query: &str,
+        embedding: &[f32],
+        groups: &[&str],
+        top: usize,
+        lexical: Option<&LexicalIndex>,
+        now: &str,
+    ) -> Result<Vec<RecallHit>, GraphRagError> {
+        let mut allowed = self.active_chunk_ids(store)?;
+        let scope = if groups.is_empty() {
+            None
+        } else {
+            let s = self.chunk_ids_in_groups(store, groups)?;
+            allowed.retain(|c| s.contains(c));
+            Some(s)
+        };
+        let candidate_k = top.max(5) * 4;
+
+        let source = BruteForceVectorSource::for_store(self, store)?;
+        let vector_hits: Vec<_> = source
+            .top_candidates(embedding, source.len().max(1))?
+            .into_iter()
+            .filter(|h| allowed.contains(&h.chunk_id))
+            .take(candidate_k)
+            .collect();
+
+        let lexical_hits: Vec<(i64, f32)> = match lexical {
+            Some(idx) => idx
+                .search(query, candidate_k * 8)?
+                .into_iter()
+                .filter(|(id, _)| allowed.contains(id))
+                .take(candidate_k)
+                .collect(),
+            None => {
+                let chunks: Vec<_> = self
+                    .list_chunks(store)?
+                    .into_iter()
+                    .filter(|c| allowed.contains(&c.id))
+                    .collect();
+                match LexicalIndex::build_from_chunks(&chunks)? {
+                    Some(idx) => idx.search(query, candidate_k)?,
+                    None => Vec::new(),
+                }
+            }
+        };
+        if vector_hits.is_empty() && lexical_hits.is_empty() {
+            return Ok(Vec::new());
+        }
+        let first = fuse_default(&[
+            ranked(vector_hits.iter().map(|h| h.chunk_id)),
+            ranked(lexical_hits.iter().map(|(id, _)| *id)),
+        ]);
+        let seeds: Vec<i64> = first
+            .iter()
+            .take(top.div_ceil(2))
+            .filter_map(|f| f.id.parse().ok())
+            .collect();
+        let expansion = self.expand_recall(store, &seeds, scope.as_ref(), top.div_ceil(2), now)?;
+        let fused = fuse_default(&[
+            ranked(vector_hits.iter().map(|h| h.chunk_id)),
+            ranked(lexical_hits.iter().map(|(id, _)| *id)),
+            ranked(expansion.chunks.iter().map(|(id, _)| *id)),
+        ]);
+        let final_ids: Vec<i64> = fused
+            .iter()
+            .take(top)
+            .filter_map(|f| f.id.parse().ok())
+            .collect();
+        let by_id: HashMap<i64, _> = self
+            .get_chunks_by_ids(&final_ids)?
+            .into_iter()
+            .map(|c| (c.id, c))
+            .collect();
+        let labels = self.chunk_labels(&final_ids)?;
+        let vec_score: HashMap<i64, f32> =
+            vector_hits.iter().map(|h| (h.chunk_id, h.score)).collect();
+        let lex_score: HashMap<i64, f32> = lexical_hits.iter().copied().collect();
+        let graph_score: HashMap<i64, f64> = expansion.chunks.iter().copied().collect();
+        let mut hits = Vec::new();
+        for f in fused.iter().take(top) {
+            let Ok(id) = f.id.parse::<i64>() else {
+                continue;
+            };
+            let Some(chunk) = by_id.get(&id) else {
+                continue;
+            };
+            let (groups, heading_path) = labels.get(&id).cloned().unwrap_or_default();
+            hits.push(RecallHit {
+                chunk_id: id,
+                rrf: f.score,
+                vec: vec_score.get(&id).copied(),
+                lex: lex_score.get(&id).copied(),
+                graph: graph_score.get(&id).copied(),
+                created_at: chunk.created_at.clone(),
+                source: chunk.source.clone(),
+                groups,
+                heading_path,
+                content: chunk.content.clone(),
+            });
+        }
+        Ok(hits)
     }
 }

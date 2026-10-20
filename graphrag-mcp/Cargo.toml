@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 graphrag-core = { path = "../graphrag-core", features = ["code", "embeddings", "embeddings_remote"] }
 graphrag-llm = { path = "../graphrag-llm" }
+graphrag-worker = { path = "../graphrag-worker" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 dirs = "5.0"

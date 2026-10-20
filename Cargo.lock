@@ -1363,6 +1363,7 @@ dependencies = [
  "dirs 5.0.1",
  "graphrag-core",
  "graphrag-llm",
+ "graphrag-worker",
  "serde",
  "serde_json",
 ]

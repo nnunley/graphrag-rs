@@ -80,6 +80,21 @@ impl WorkerConfig {
         }
     }
 
+    /// `new` plus `GRAPHRAG_LLM_MODEL` and `GRAPHRAG_LLM_CONCURRENCY`.
+    pub fn from_env(data_dir: PathBuf) -> Self {
+        let mut cfg = Self::new(data_dir);
+        if let Ok(m) = std::env::var("GRAPHRAG_LLM_MODEL") {
+            cfg.model = m;
+        }
+        if let Some(n) = std::env::var("GRAPHRAG_LLM_CONCURRENCY")
+            .ok()
+            .and_then(|v| v.parse().ok())
+        {
+            cfg.concurrency = n;
+        }
+        cfg
+    }
+
     pub fn extraction(&self) -> ExtractionConfig {
         ExtractionConfig {
             model: self.model.clone(),
@@ -92,10 +107,16 @@ impl WorkerConfig {
 
     /// The fingerprint expectations this configuration implies.
     pub fn static_config(&self, embedder: &dyn TextEmbedder) -> StaticConfig {
+        self.static_config_with(embedder.id(), embedder.dim())
+    }
+
+    /// As [`WorkerConfig::static_config`], from an embedder identity alone
+    /// (so `status` needn't load the model).
+    pub fn static_config_with(&self, embedder_id: String, dim: usize) -> StaticConfig {
         StaticConfig {
             store: self.store.clone(),
-            embedder_id: embedder.id(),
-            dim: embedder.dim(),
+            embedder_id,
+            dim,
             chunker: self.chunker.clone(),
             extraction: self.extraction(),
             community: self.community.clone(),

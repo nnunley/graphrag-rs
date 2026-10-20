@@ -5,9 +5,8 @@ use graphrag_core::documents::{AddDocument, AddOutcome, Origin};
 use graphrag_core::fingerprints::{ChunkerProfile, embed_fp};
 use graphrag_core::status::{StaticConfig, Step, StepState, SubjectKind};
 use graphrag_core::text_embedder::TextEmbedder;
-use graphrag_core::{BruteForceVectorSource, Database, LexicalIndex, VectorCandidateSource};
+use graphrag_core::{Database, LexicalIndex};
 use graphrag_worker::{ExitStatus, WorkerConfig};
-use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 /// The single store everything is added to.
@@ -154,28 +153,10 @@ pub fn note(
     })
 }
 
-pub struct Hit {
-    pub chunk_id: i64,
-    pub rrf: f64,
-    pub vec: Option<f32>,
-    pub lex: Option<f32>,
-    pub graph: Option<f64>,
-    pub created_at: String,
-    pub source: String,
-    pub groups: Vec<String>,
-    pub heading_path: Vec<String>,
-    pub content: String,
-}
+pub use graphrag_core::recall::RecallHit as Hit;
 
-fn ranked(ids: impl Iterator<Item = i64>) -> Vec<graphrag_core::leit_fusion::RankedResult> {
-    ids.enumerate()
-        .map(|(i, id)| graphrag_core::leit_fusion::RankedResult::new(id.to_string(), i + 1))
-        .collect()
-}
-
-/// Hybrid recall: exact cosine + BM25, fused with RRF, plus a third lane
-/// that follows shared entities across groups. Returned chunks with
-/// incomplete steps are escalated and a worker is started.
+/// Hybrid recall (vector + BM25 + graph expansion, see core). Returned
+/// chunks with incomplete steps are escalated and a worker is started.
 pub fn ask(
     data_dir: &Path,
     query: &str,
@@ -195,109 +176,14 @@ pub fn ask(
             store.dim
         ));
     }
-    let mut allowed: HashSet<i64> = db
-        .active_chunk_ids(MEMORY_STORE)
-        .map_err(|e| e.to_string())?;
-    let scope = if groups.is_empty() {
-        None
-    } else {
-        let g: Vec<&str> = groups.iter().map(String::as_str).collect();
-        let s = db
-            .chunk_ids_in_groups(MEMORY_STORE, &g)
-            .map_err(|e| e.to_string())?;
-        allowed.retain(|c| s.contains(c));
-        Some(s)
-    };
-    let candidate_k = top.max(5) * 4;
-
-    // Lane 1: exact vector recall over eligible chunks.
-    let source = BruteForceVectorSource::for_store(&db, MEMORY_STORE)
-        .map_err(|e| format!("load vectors: {e}"))?;
-    let vector_hits: Vec<_> = source
-        .top_candidates(&embedding, source.len().max(1))
-        .map_err(|e| format!("vector search: {e}"))?
-        .into_iter()
-        .filter(|h| allowed.contains(&h.chunk_id))
-        .take(candidate_k)
-        .collect();
-
-    // Lane 2: BM25 over eligible chunks.
-    let chunks: Vec<_> = db
-        .list_chunks(MEMORY_STORE)
-        .map_err(|e| format!("list chunks: {e}"))?
-        .into_iter()
-        .filter(|c| allowed.contains(&c.id))
-        .collect();
-    let lexical_hits = match LexicalIndex::build_from_chunks(&chunks)
-        .map_err(|e| format!("build lexical: {e}"))?
-    {
-        Some(idx) => idx
-            .search(query, candidate_k)
-            .map_err(|e| format!("lexical search: {e}"))?,
-        None => Vec::new(),
-    };
-    if vector_hits.is_empty() && lexical_hits.is_empty() {
-        return Ok(Vec::new());
-    }
-    let first = graphrag_core::leit_fusion::fuse_default(&[
-        ranked(vector_hits.iter().map(|h| h.chunk_id)),
-        ranked(lexical_hits.iter().map(|(id, _)| *id)),
-    ]);
-    // Expand from the best half of the first-pass hits.
-    let seeds: Vec<i64> = first
-        .iter()
-        .take(top.div_ceil(2))
-        .filter_map(|f| f.id.parse().ok())
-        .collect();
-
-    // Lane 3: graph expansion through shared entities (dormant ones skipped).
+    let groups: Vec<&str> = groups.iter().map(String::as_str).collect();
     let now = db.now_utc().map_err(|e| e.to_string())?;
-    let expansion = db
-        .expand_recall(MEMORY_STORE, &seeds, scope.as_ref(), (top / 2).max(1), &now)
-        .map_err(|e| format!("expand: {e}"))?;
-    let fused = graphrag_core::leit_fusion::fuse_default(&[
-        ranked(vector_hits.iter().map(|h| h.chunk_id)),
-        ranked(lexical_hits.iter().map(|(id, _)| *id)),
-        ranked(expansion.chunks.iter().map(|(id, _)| *id)),
-    ]);
-    let final_ids: Vec<i64> = fused
-        .iter()
-        .take(top)
-        .filter_map(|f| f.id.parse().ok())
-        .collect();
-
-    let found = db
-        .get_chunks_by_ids(&final_ids)
-        .map_err(|e| format!("fetch chunks: {e}"))?;
-    let by_id: HashMap<i64, _> = found.into_iter().map(|c| (c.id, c)).collect();
-    let labels = db.chunk_labels(&final_ids).map_err(|e| e.to_string())?;
-    let vec_score: HashMap<i64, f32> = vector_hits.iter().map(|h| (h.chunk_id, h.score)).collect();
-    let lex_score: HashMap<i64, f32> = lexical_hits.iter().copied().collect();
-    let graph_score: HashMap<i64, f64> = expansion.chunks.iter().copied().collect();
-    let mut hits = Vec::new();
-    for f in fused.iter().take(top) {
-        let Ok(id) = f.id.parse::<i64>() else {
-            continue;
-        };
-        let Some(chunk) = by_id.get(&id) else {
-            continue;
-        };
-        let (groups, heading_path) = labels.get(&id).cloned().unwrap_or_default();
-        hits.push(Hit {
-            chunk_id: id,
-            rrf: f.score,
-            vec: vec_score.get(&id).copied(),
-            lex: lex_score.get(&id).copied(),
-            graph: graph_score.get(&id).copied(),
-            created_at: chunk.created_at.clone(),
-            source: chunk.source.clone().unwrap_or_else(|| "-".into()),
-            groups,
-            heading_path,
-            content: chunk.content.clone(),
-        });
-    }
+    let hits = db
+        .hybrid_recall(MEMORY_STORE, query, &embedding, &groups, top, None, &now)
+        .map_err(|e| format!("recall: {e}"))?;
+    let ids: Vec<i64> = hits.iter().map(|h| h.chunk_id).collect();
     // Retrieval sets priority: never waits on extraction.
-    if db.escalate_chunks(&final_ids).map_err(|e| e.to_string())? > 0 {
+    if db.escalate_chunks(&ids).map_err(|e| e.to_string())? > 0 {
         spawn_worker(data_dir);
     }
     Ok(hits)
@@ -314,7 +200,7 @@ pub fn print_hits(hits: &[Hit]) {
             opt(h.lex.map(|s| format!("{s:.3}"))),
             opt(h.graph.map(|s| format!("{s:.3}"))),
             h.created_at,
-            h.source,
+            h.source.as_deref().unwrap_or("-"),
             if h.groups.is_empty() {
                 "-".into()
             } else {
@@ -340,17 +226,8 @@ pub struct WorkFlags {
 
 /// The worker's configuration from flags and environment.
 pub fn worker_config(data_dir: &Path, flags: &WorkFlags) -> WorkerConfig {
-    let mut cfg = WorkerConfig::new(data_dir.to_path_buf());
+    let mut cfg = WorkerConfig::from_env(data_dir.to_path_buf());
     cfg.store = MEMORY_STORE.into();
-    if let Ok(m) = std::env::var("GRAPHRAG_LLM_MODEL") {
-        cfg.model = m;
-    }
-    if let Some(n) = std::env::var("GRAPHRAG_LLM_CONCURRENCY")
-        .ok()
-        .and_then(|v| v.parse().ok())
-    {
-        cfg.concurrency = n;
-    }
     cfg.max_items = if flags.once {
         Some(cfg.concurrency.max(1))
     } else {
@@ -380,25 +257,9 @@ pub fn work(data_dir: &Path, flags: &WorkFlags, emb: &dyn TextEmbedder) -> ExitS
 
 /// Expectations for `status`, without loading the embedding model.
 pub fn status_config(data_dir: &Path, embedder_id: String, dim: usize) -> StaticConfig {
-    let cfg = worker_config(
-        data_dir,
-        &WorkFlags {
-            groups: vec![],
-            once: false,
-            max_items: None,
-            retry_failed: false,
-            accept_reextract: false,
-        },
-    );
-    StaticConfig {
-        store: MEMORY_STORE.into(),
-        embedder_id,
-        dim,
-        chunker: cfg.chunker.clone(),
-        extraction: cfg.extraction(),
-        community: cfg.community.clone(),
-        lift: cfg.lift.clone(),
-    }
+    let mut cfg = WorkerConfig::from_env(data_dir.to_path_buf());
+    cfg.store = MEMORY_STORE.into();
+    cfg.static_config_with(embedder_id, dim)
 }
 
 pub fn status(data_dir: &Path, json: bool, sc: &StaticConfig) -> Result<(), String> {

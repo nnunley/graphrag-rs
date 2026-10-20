@@ -3,15 +3,12 @@
 //! A Model Context Protocol server providing knowledge graph memory tools.
 //! Implements JSON-RPC 2.0 over stdio with sampling support for LLM-powered features.
 
+use graphrag_core::documents::{AddDocument, AddOutcome, Origin};
+use graphrag_core::fingerprints::ChunkerProfile;
+use graphrag_core::status::{Step, SubjectKind};
 use graphrag_core::{
-    BruteForceVectorSource, ChunkerConfig, CodeChunkerConfig, CodeLanguage, Database, Embedder,
-    EmbedderConfig, EmbedderModel, EntityInput, ExtractResult, LexicalIndex, VectorCandidate,
-    VectorCandidateSource, apply_extracted_entities, chunk_code, chunk_text as core_chunk_text,
-    default_embedder_cache_dir, extraction_provenance_nonce, leit_fusion,
-};
-use graphrag_llm::{
-    EntityTriple, continuation_extraction_prompt, entity_extraction_prompt,
-    parse_entity_extraction, reflection_prompt,
+    BruteForceVectorSource, Database, Embedder, EmbedderConfig, EmbedderModel, LexicalIndex,
+    VectorCandidate, VectorCandidateSource, default_embedder_cache_dir,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -19,48 +16,33 @@ use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering};
-
-/// Default chunk size in characters
-const DEFAULT_CHUNK_SIZE: usize = 2000;
-/// Default overlap between chunks in characters
-const DEFAULT_CHUNK_OVERLAP: usize = 200;
-
-/// Chunk text using semantic text-splitter
-fn chunk_text(text: &str, chunk_size: usize, overlap: usize, markdown: bool) -> Vec<String> {
-    let config = ChunkerConfig::new(chunk_size)
-        .with_markdown(markdown)
-        .with_overlap(overlap);
-    core_chunk_text(text, &config)
-}
 
 /// Global embedder instance (lazy initialized)
 static EMBEDDER: OnceLock<Result<Embedder, String>> = OnceLock::new();
 
-/// Request ID counter for sampling requests
-static REQUEST_ID: AtomicU64 = AtomicU64::new(1000);
+/// The embedding model, from `GRAPHRAG_EMBED_MODEL` (default Nomic).
+fn embedder_model() -> EmbedderModel {
+    std::env::var("GRAPHRAG_EMBED_MODEL")
+        .ok()
+        .and_then(|m| match m.to_lowercase().as_str() {
+            "minilm" | "mini" => Some(EmbedderModel::MiniLM),
+            "nomic" | "nomic-embed-text" => Some(EmbedderModel::NomicEmbedText),
+            _ => None,
+        })
+        .unwrap_or(EmbedderModel::NomicEmbedText)
+}
 
 /// Get or initialize the embedder
 fn get_embedder() -> Result<&'static Embedder, String> {
     EMBEDDER
         .get_or_init(|| {
             eprintln!("Initializing embedder (this may download the model on first use)...");
-            let model = std::env::var("GRAPHRAG_EMBED_MODEL")
-                .ok()
-                .and_then(|m| match m.to_lowercase().as_str() {
-                    "minilm" | "mini" => Some(EmbedderModel::MiniLM),
-                    "nomic" | "nomic-embed-text" => Some(EmbedderModel::NomicEmbedText),
-                    _ => None,
-                })
-                .unwrap_or(EmbedderModel::NomicEmbedText);
-
             let config = EmbedderConfig {
-                model,
+                model: embedder_model(),
                 show_download_progress: true,
                 cache_dir: Some(default_embedder_cache_dir()),
                 remote: None,
             };
-
             Embedder::new(config).map_err(|e| e.to_string())
         })
         .as_ref()
@@ -129,104 +111,10 @@ impl JsonRpcResponse {
     }
 }
 
-// MCP sampling-protocol structs. These describe the wire shape used when
-// requesting LLM completions from the connected MCP client. They're declared
-// here to document the contract and to be ready when sampling is wired into
-// pending-operation handling; for now no constructor exists (see the
-// `pending_operations` map and the request/response handler in
-// `handle_message`). Drop the allow once sampling is invoked from code.
-/// Sampling message content
-#[allow(dead_code)]
-#[derive(Debug, Serialize, Deserialize, Clone)]
-struct SamplingContent {
-    #[serde(rename = "type")]
-    content_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    text: Option<String>,
-}
-
-/// Sampling message
-#[allow(dead_code)]
-#[derive(Debug, Serialize, Deserialize, Clone)]
-struct SamplingMessage {
-    role: String,
-    content: SamplingContent,
-}
-
-/// Sampling request params
-#[allow(dead_code)]
-#[derive(Debug, Serialize)]
-struct SamplingParams {
-    messages: Vec<SamplingMessage>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(rename = "systemPrompt")]
-    system_prompt: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(rename = "maxTokens")]
-    max_tokens: Option<u32>,
-}
-
-/// Sampling response result
-#[allow(dead_code)]
-#[derive(Debug, Deserialize)]
-struct SamplingResult {
-    content: SamplingContent,
-    model: Option<String>,
-    #[serde(rename = "stopReason")]
-    stop_reason: Option<String>,
-}
-
-/// Maximum number of self-reflection iterations for entity extraction
-const MAX_REFLECTION_ITERATIONS: usize = 2;
-
-/// Pending operation that requires sampling
-#[derive(Debug)]
-enum PendingOperation {
-    /// Process a single chunk for entity extraction
-    AddChunk {
-        original_id: Value,
-        store_name: String,
-        chunk_content: String,
-        chunk_index: usize,
-        total_chunks: usize,
-        source: Option<String>,
-        /// Remaining chunks to process after this one
-        remaining_chunks: Vec<String>,
-        /// Accumulated results
-        chunks_added: usize,
-        entities_extracted: usize,
-        /// Entities found so far in this chunk (for reflection)
-        current_chunk_entities: Vec<EntityTriple>,
-        /// Current reflection iteration (0 = initial extraction)
-        reflection_iteration: usize,
-    },
-    /// Self-reflection: ask if entities were missed
-    ReflectionCheck {
-        original_id: Value,
-        store_name: String,
-        chunk_content: String,
-        chunk_index: usize,
-        total_chunks: usize,
-        source: Option<String>,
-        remaining_chunks: Vec<String>,
-        chunks_added: usize,
-        entities_extracted: usize,
-        current_chunk_entities: Vec<EntityTriple>,
-        reflection_iteration: usize,
-    },
-    SummarizeCommunity {
-        original_id: Value,
-        community_id: i64,
-        #[allow(dead_code)]
-        entities: Vec<String>,
-    },
-}
-
 /// MCP Server implementation
 struct McpServer {
     data_dir: PathBuf,
     default_store: String,
-    pending_operations: HashMap<u64, PendingOperation>,
     /// Per-store BM25 indexes, built lazily on first recall, retained for
     /// the server's lifetime, invalidated on add_document/add_code. leit
     /// Phase 1 has no incremental adds, so any mutation rebuilds the whole
@@ -240,27 +128,11 @@ struct McpServer {
     lexical_cache: std::sync::Mutex<HashMap<String, std::sync::Arc<LexicalIndex>>>,
 }
 
-/// Per-chunk batch context: where in the chunk stream we are and how much
-/// work has accumulated. Bundled so process_chunk and its async continuations
-/// don't need 5-7 individual positional arguments threaded through them.
-struct ChunkBatchProgress {
-    chunk_index: usize,
-    total_chunks: usize,
-    /// Chunks not yet started.
-    remaining_chunks: Vec<String>,
-    /// Total chunks successfully written across the batch so far.
-    chunks_added: usize,
-    /// Total entity-relations extracted across the batch so far.
-    entities_extracted: usize,
-}
-
 impl McpServer {
     fn new() -> Self {
         Self {
             data_dir: get_data_dir(),
-            default_store: std::env::var("GRAPHRAG_STORE")
-                .unwrap_or_else(|_| "conversations".to_string()),
-            pending_operations: HashMap::new(),
+            default_store: std::env::var("GRAPHRAG_STORE").unwrap_or_else(|_| "memory".to_string()),
             lexical_cache: std::sync::Mutex::new(HashMap::new()),
         }
     }
@@ -313,21 +185,8 @@ impl McpServer {
         self.data_dir.join("graphrag.db")
     }
 
-    fn next_request_id() -> u64 {
-        REQUEST_ID.fetch_add(1, Ordering::SeqCst)
-    }
-
     /// Handle incoming message - could be a request or a response to our sampling request
     fn handle_message(&mut self, line: &str, stdout: &mut impl Write) {
-        // Try to parse as a response first (to our sampling requests)
-        if let Ok(response) = serde_json::from_str::<JsonRpcResponse>(line)
-            && (response.result.is_some() || response.error.is_some())
-            && let Some(id) = response.id.as_u64()
-        {
-            self.handle_sampling_response(id, response, stdout);
-            return;
-        }
-
         // Otherwise parse as a request
         let request: JsonRpcRequest = match serde_json::from_str(line) {
             Ok(r) => r,
@@ -399,93 +258,64 @@ impl McpServer {
             "tools": [
                 {
                     "name": "graphrag_recall",
-                    "description": "Search knowledge graph memory using natural language. Embeds the query locally and returns semantically similar content plus related entities discovered through graph traversal.",
+                    "description": "Search memory with natural language: exact-cosine vector search + BM25, fused with RRF, plus a graph lane that follows shared entities across groups. Hits with unfinished ingestion are moved to the front of the background work.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
-                            "query": {
-                                "type": "string",
-                                "description": "Natural language query to search for"
-                            },
+                            "query": { "type": "string", "description": "Natural language query" },
                             "top": { "type": "number", "description": "Number of results (default: 5)" },
-                            "expand": { "type": "number", "description": "Graph expansion depth (default: 1)" },
-                            "store": { "type": "string", "description": format!("Store name (default: {})", self.default_store) }
+                            "in": { "type": "array", "items": { "type": "string" }, "description": "Restrict to these groups (and subgroups); default: everything" },
+                            "store": { "type": "string", "description": "Deprecated alias for `in`" }
                         },
                         "required": ["query"]
                     }
                 },
                 {
                     "name": "graphrag_add_document",
-                    "description": "Add a document to the knowledge graph. Automatically chunks long documents, uses LLM to extract entities and relations from each chunk, then embeds and stores the content.",
+                    "description": "Add a document. It is stored once (identical text is deduplicated), split into sections and chunks, and handed to the background worker, which embeds, extracts entities and relations, clusters and summarizes. Returns immediately.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
-                            "content": {
-                                "type": "string",
-                                "description": "The document content to add"
-                            },
-                            "source": {
-                                "type": "string",
-                                "description": "Optional source identifier (e.g., filename, URL)"
-                            },
-                            "store": { "type": "string", "description": format!("Store name (default: {})", self.default_store) },
-                            "chunk_size": {
-                                "type": "number",
-                                "description": format!("Chunk size in characters (default: {})", DEFAULT_CHUNK_SIZE)
-                            },
-                            "chunk_overlap": {
-                                "type": "number",
-                                "description": format!("Overlap between chunks in characters (default: {})", DEFAULT_CHUNK_OVERLAP)
-                            }
+                            "content": { "type": "string", "description": "The document content" },
+                            "source": { "type": "string", "description": "Optional source identifier (filename, URL)" },
+                            "doc_key": { "type": "string", "description": "Stable key (path, page id); new text under the same key replaces the old version" },
+                            "groups": { "type": "array", "items": { "type": "string" }, "description": "Groups it belongs to (default: conversations)" },
+                            "store": { "type": "string", "description": "Deprecated alias for a group" }
                         },
                         "required": ["content"]
                     }
                 },
                 {
                     "name": "graphrag_add_code",
-                    "description": "Add source code to the knowledge graph with AST-aware chunking. Uses tree-sitter to split code at semantic boundaries (functions, classes, modules), extracts entities and relations, then embeds and stores the content.",
+                    "description": "Add source code, chunked as code (no markdown sections), and hand it to the background worker. Returns immediately.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
-                            "content": {
-                                "type": "string",
-                                "description": "The source code content to add"
-                            },
-                            "file_path": {
-                                "type": "string",
-                                "description": "File path (used for language detection from extension, e.g., 'main.rs', 'app.py')"
-                            },
-                            "language": {
-                                "type": "string",
-                                "description": "Programming language (optional, auto-detected from file_path). Supported: rust, python, javascript, typescript, go, c, cpp"
-                            },
-                            "source": {
-                                "type": "string",
-                                "description": "Optional source identifier (e.g., repository URL, module name)"
-                            },
-                            "store": { "type": "string", "description": format!("Store name (default: {})", self.default_store) },
-                            "chunk_size": {
-                                "type": "number",
-                                "description": format!("Chunk size in characters (default: {})", DEFAULT_CHUNK_SIZE)
-                            }
+                            "content": { "type": "string", "description": "The source code" },
+                            "file_path": { "type": "string", "description": "File path, used as the source" },
+                            "source": { "type": "string", "description": "Optional source identifier" },
+                            "doc_key": { "type": "string", "description": "Stable key; new text under it replaces the old version" },
+                            "groups": { "type": "array", "items": { "type": "string" }, "description": "Groups it belongs to (default: code)" },
+                            "store": { "type": "string", "description": "Deprecated alias for a group" }
                         },
                         "required": ["content"]
                     }
                 },
                 {
                     "name": "graphrag_summarize_community",
-                    "description": "Generate a summary for a community using LLM. The summary captures the key themes and relationships among the community's entities.",
+                    "description": "Return a community's stored summary and its status. Summaries are written by the background worker.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
-                            "community_id": {
-                                "type": "number",
-                                "description": "The community ID to summarize"
-                            },
-                            "store": { "type": "string", "description": format!("Store name (default: {})", self.default_store) }
+                            "community_id": { "type": "number", "description": "The community ID" }
                         },
                         "required": ["community_id"]
                     }
+                },
+                {
+                    "name": "graphrag_status",
+                    "description": "Ingestion status: per group and step, how many are current, stale, missing and failed; backlog; whether a worker is running; last LLM success or error.",
+                    "inputSchema": { "type": "object", "properties": {} }
                 },
                 {
                     "name": "graphrag_stores",
@@ -534,7 +364,8 @@ impl McpServer {
                             "embedding": { "type": "array", "items": { "type": "number" } },
                             "top": { "type": "number" },
                             "expand": { "type": "number" },
-                            "store": { "type": "string" }
+                            "in": { "type": "array", "items": { "type": "string" }, "description": "Restrict to these groups" },
+                            "store": { "type": "string", "description": "Deprecated alias for `in`" }
                         },
                         "required": ["embedding"]
                     }
@@ -578,7 +409,7 @@ impl McpServer {
                 },
                 {
                     "name": "graphrag_merge_entities",
-                    "description": "Merge two entities into one. All relations and chunk links from source entity are transferred to target. Source entity is deleted.",
+                    "description": "Merge two entities: records a retractable same_as assertion from source to target. Nothing is deleted; reads and clustering resolve the source to the target.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
@@ -588,7 +419,7 @@ impl McpServer {
                             },
                             "source_id": {
                                 "type": "number",
-                                "description": "ID of the entity to merge into target (will be deleted)"
+                                "description": "ID of the entity to merge into target"
                             }
                         },
                         "required": ["target_id", "source_id"]
@@ -613,16 +444,17 @@ impl McpServer {
         &mut self,
         id: Value,
         params: Value,
-        stdout: &mut impl Write,
+        _stdout: &mut impl Write,
     ) -> Option<JsonRpcResponse> {
         let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
         let args = params.get("arguments").cloned().unwrap_or(json!({}));
 
         match name {
             "graphrag_recall" => Some(self.tool_recall(&args, id)),
-            "graphrag_add_document" => self.tool_add_document(&args, id, stdout),
-            "graphrag_add_code" => self.tool_add_code(&args, id, stdout),
-            "graphrag_summarize_community" => self.tool_summarize_community(&args, id, stdout),
+            "graphrag_add_document" => Some(self.tool_add_document(&args, id)),
+            "graphrag_add_code" => Some(self.tool_add_code(&args, id)),
+            "graphrag_summarize_community" => Some(self.tool_summarize_community(&args, id)),
+            "graphrag_status" => Some(self.tool_status(id)),
             "graphrag_stores" => Some(self.tool_stores(id)),
             "graphrag_entities" => Some(self.tool_entities(&args, id)),
             "graphrag_relations" => Some(self.tool_relations(&args, id)),
@@ -655,878 +487,180 @@ impl McpServer {
         )
     }
 
-    fn get_store_name(&self, args: &Value) -> String {
-        args.get("store")
-            .and_then(|v| v.as_str())
-            .map(String::from)
-            .unwrap_or_else(|| self.default_store.clone())
+    /// Everything lives in one store; a `store` argument is a deprecated
+    /// group alias and doesn't select a store.
+    fn get_store_name(&self, _args: &Value) -> String {
+        self.default_store.clone()
     }
 
-    /// Send a sampling request to the client
-    fn send_sampling_request(
-        &mut self,
-        system_prompt: &str,
-        user_message: &str,
-        max_tokens: u32,
-        operation: PendingOperation,
-        stdout: &mut impl Write,
-    ) -> u64 {
-        let request_id = Self::next_request_id();
-
-        let request = json!({
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "method": "sampling/createMessage",
-            "params": {
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": {
-                            "type": "text",
-                            "text": user_message
-                        }
-                    }
-                ],
-                "systemPrompt": system_prompt,
-                "maxTokens": max_tokens
-            }
-        });
-
-        self.pending_operations.insert(request_id, operation);
-
-        if let Err(e) = writeln!(stdout, "{}", serde_json::to_string(&request).unwrap()) {
-            eprintln!("Failed to send sampling request: {}", e);
-        }
-        let _ = stdout.flush();
-
-        request_id
-    }
-
-    /// Handle response to our sampling request
-    fn handle_sampling_response(
-        &mut self,
-        request_id: u64,
-        response: JsonRpcResponse,
-        stdout: &mut impl Write,
-    ) {
-        let operation = match self.pending_operations.remove(&request_id) {
-            Some(op) => op,
-            None => {
-                eprintln!("Received response for unknown request: {}", request_id);
-                return;
-            }
-        };
-
-        // Extract text from sampling response
-        let text = response
-            .result
-            .as_ref()
-            .and_then(|r| r.get("content"))
-            .and_then(|c| c.get("text"))
-            .and_then(|t| t.as_str())
-            .unwrap_or("");
-
-        match operation {
-            PendingOperation::AddChunk {
-                original_id,
-                store_name,
-                chunk_content,
-                chunk_index,
-                total_chunks,
-                source,
-                remaining_chunks,
-                chunks_added,
-                entities_extracted,
-                current_chunk_entities,
-                reflection_iteration,
-            } => {
-                // Process extraction result and potentially trigger reflection
-                self.handle_extraction_result(
-                    original_id,
-                    store_name,
-                    chunk_content,
-                    chunk_index,
-                    total_chunks,
-                    source,
-                    remaining_chunks,
-                    chunks_added,
-                    entities_extracted,
-                    current_chunk_entities,
-                    reflection_iteration,
-                    text,
-                    stdout,
-                );
-            }
-            PendingOperation::ReflectionCheck {
-                original_id,
-                store_name,
-                chunk_content,
-                chunk_index,
-                total_chunks,
-                source,
-                remaining_chunks,
-                chunks_added,
-                entities_extracted,
-                current_chunk_entities,
-                reflection_iteration,
-            } => {
-                // Handle reflection response (yes/no to "did you miss entities?")
-                self.handle_reflection_response(
-                    original_id,
-                    store_name,
-                    chunk_content,
-                    chunk_index,
-                    total_chunks,
-                    source,
-                    remaining_chunks,
-                    chunks_added,
-                    entities_extracted,
-                    current_chunk_entities,
-                    reflection_iteration,
-                    text,
-                    stdout,
-                );
-            }
-            PendingOperation::SummarizeCommunity {
-                original_id,
-                community_id,
-                entities: _,
-            } => {
-                let final_response =
-                    self.complete_summarize_community(original_id, community_id, text);
-                if let Err(e) = writeln!(
-                    stdout,
-                    "{}",
-                    serde_json::to_string(&final_response).unwrap()
-                ) {
-                    eprintln!("Write error: {}", e);
-                }
-                let _ = stdout.flush();
-            }
-        };
-    }
-
-    // ============ Tool implementations ============
-
-    fn tool_add_document(
-        &mut self,
-        args: &Value,
-        id: Value,
-        stdout: &mut impl Write,
-    ) -> Option<JsonRpcResponse> {
-        let content = match args.get("content").and_then(|v| v.as_str()) {
-            Some(c) => c.to_string(),
-            None => return Some(self.tool_error(id, "Missing 'content' argument".to_string())),
-        };
-
-        let store_name = self.get_store_name(args);
-        let source = args
-            .get("source")
-            .and_then(|v| v.as_str())
-            .map(String::from);
-
-        // Get chunk parameters from args or use defaults
-        let chunk_size = args
-            .get("chunk_size")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as usize)
-            .unwrap_or(DEFAULT_CHUNK_SIZE);
-        let chunk_overlap = args
-            .get("chunk_overlap")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as usize)
-            .unwrap_or(DEFAULT_CHUNK_OVERLAP);
-
-        // Check if content looks like markdown
-        let is_markdown = args
-            .get("markdown")
-            .and_then(|v| v.as_bool())
-            .unwrap_or_else(|| {
-                // Auto-detect markdown
-                content.contains("# ") || content.contains("## ") || content.contains("```")
-            });
-
-        // Split content into chunks using semantic text-splitter
-        let mut chunks = chunk_text(&content, chunk_size, chunk_overlap, is_markdown);
-        let total_chunks = chunks.len();
-
-        if chunks.is_empty() {
-            return Some(self.tool_error(id, "No content to process".to_string()));
-        }
-
-        eprintln!(
-            "Processing document: {} chars -> {} chunks",
-            content.len(),
-            total_chunks
-        );
-
-        // Take first chunk to process, rest go in remaining_chunks
-        let first_chunk = chunks.remove(0);
-
-        // Start processing first chunk
-        self.process_chunk(
-            id,
-            store_name,
-            first_chunk,
-            source,
-            ChunkBatchProgress {
-                chunk_index: 0,
-                total_chunks,
-                remaining_chunks: chunks,
-                chunks_added: 0,
-                entities_extracted: 0,
-            },
-            stdout,
-        );
-
-        None // Response will come later
-    }
-
-    /// Add source code to the knowledge graph with AST-aware chunking
-    fn tool_add_code(
-        &mut self,
-        args: &Value,
-        id: Value,
-        stdout: &mut impl Write,
-    ) -> Option<JsonRpcResponse> {
-        let content = match args.get("content").and_then(|v| v.as_str()) {
-            Some(c) => c.to_string(),
-            None => return Some(self.tool_error(id, "Missing 'content' argument".to_string())),
-        };
-
-        // Determine programming language
-        let language = if let Some(lang_str) = args.get("language").and_then(|v| v.as_str()) {
-            match CodeLanguage::from_name(lang_str) {
-                Some(lang) => lang,
-                None => {
-                    return Some(self.tool_error(
-                        id,
-                        format!(
-                            "Unsupported language: '{}'. Supported: rust, python, javascript, typescript, go, c, cpp",
-                            lang_str
-                        ),
-                    ))
-                }
-            }
-        } else if let Some(file_path) = args.get("file_path").and_then(|v| v.as_str()) {
-            let ext = file_path.rsplit('.').next().unwrap_or("");
-            match CodeLanguage::from_extension(ext) {
-                Some(lang) => lang,
-                None => {
-                    return Some(self.tool_error(
-                        id,
-                        format!(
-                            "Cannot detect language from extension '.{}'. Supported extensions: rs, py, js, ts, tsx, go, c, h, cpp, cc, cxx, hpp",
-                            ext
-                        ),
-                    ))
-                }
-            }
-        } else {
-            return Some(
-                self.tool_error(
-                    id,
-                    "Either 'language' or 'file_path' (for auto-detection) must be provided"
-                        .to_string(),
-                ),
-            );
-        };
-
-        let store_name = self.get_store_name(args);
-        let source = args
-            .get("source")
-            .and_then(|v| v.as_str())
-            .or_else(|| args.get("file_path").and_then(|v| v.as_str()))
-            .map(String::from);
-
-        let chunk_size = args
-            .get("chunk_size")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as usize)
-            .unwrap_or(DEFAULT_CHUNK_SIZE);
-
-        // Use AST-aware code chunking
-        let config = CodeChunkerConfig::new(language).with_chunk_size(chunk_size);
-        let mut chunks = match chunk_code(&content, &config) {
-            Ok(c) => c,
-            Err(e) => return Some(self.tool_error(id, format!("Code chunking failed: {}", e))),
-        };
-
-        let total_chunks = chunks.len();
-
-        if chunks.is_empty() {
-            return Some(self.tool_error(id, "No code content to process".to_string()));
-        }
-
-        eprintln!(
-            "Processing code ({:?}): {} chars -> {} chunks",
-            language,
-            content.len(),
-            total_chunks
-        );
-
-        // Take first chunk to process
-        let first_chunk = chunks.remove(0);
-
-        // Use same processing pipeline as documents
-        self.process_chunk(
-            id,
-            store_name,
-            first_chunk,
-            source,
-            ChunkBatchProgress {
-                chunk_index: 0,
-                total_chunks,
-                remaining_chunks: chunks,
-                chunks_added: 0,
-                entities_extracted: 0,
-            },
-            stdout,
-        );
-
-        None // Response will come later
-    }
-
-    /// Start processing a chunk by sending entity extraction request
-    fn process_chunk(
-        &mut self,
-        original_id: Value,
-        store_name: String,
-        chunk_content: String,
-        source: Option<String>,
-        batch: ChunkBatchProgress,
-        stdout: &mut impl Write,
-    ) {
-        let ChunkBatchProgress {
-            chunk_index,
-            total_chunks,
-            remaining_chunks,
-            chunks_added,
-            entities_extracted,
-        } = batch;
-        let prompt = entity_extraction_prompt(&chunk_content, chunk_index, total_chunks);
-
-        eprintln!(
-            "Processing chunk {}/{} ({} chars)",
-            chunk_index + 1,
-            total_chunks,
-            chunk_content.len()
-        );
-
-        self.send_sampling_request(
-            &prompt.system,
-            &prompt.user,
-            prompt.max_tokens,
-            PendingOperation::AddChunk {
-                original_id,
-                store_name,
-                chunk_content,
-                chunk_index,
-                total_chunks,
-                source,
-                remaining_chunks,
-                chunks_added,
-                entities_extracted,
-                current_chunk_entities: Vec::new(),
-                reflection_iteration: 0,
-            },
-            stdout,
-        );
-    }
-
-    /// Handle extraction result - either trigger reflection or finalize chunk
-    #[allow(clippy::too_many_arguments)]
-    fn handle_extraction_result(
-        &mut self,
-        original_id: Value,
-        store_name: String,
-        chunk_content: String,
-        chunk_index: usize,
-        total_chunks: usize,
-        source: Option<String>,
-        remaining_chunks: Vec<String>,
-        chunks_added: usize,
-        entities_extracted: usize,
-        mut current_chunk_entities: Vec<EntityTriple>,
-        reflection_iteration: usize,
-        llm_response: &str,
-        stdout: &mut impl Write,
-    ) {
-        // Parse new entities from LLM response
-        let new_entities = parse_entity_extraction(llm_response)
-            .map(|extraction| extraction.entities)
-            .unwrap_or_default();
-
-        // Merge new entities with existing ones
-        current_chunk_entities.extend(new_entities.clone());
-
-        eprintln!(
-            "Chunk {}/{} iteration {}: found {} new entities (total: {})",
-            chunk_index + 1,
-            total_chunks,
-            reflection_iteration,
-            new_entities.len(),
-            current_chunk_entities.len()
-        );
-
-        // Decide whether to do reflection
-        // Only reflect if we found entities and haven't hit max iterations
-        if !new_entities.is_empty() && reflection_iteration < MAX_REFLECTION_ITERATIONS {
-            // Ask if we missed any entities
-            self.send_reflection_check(
-                original_id,
-                store_name,
-                chunk_content,
-                chunk_index,
-                total_chunks,
-                source,
-                remaining_chunks,
-                chunks_added,
-                entities_extracted,
-                current_chunk_entities,
-                reflection_iteration,
-                stdout,
-            );
-        } else {
-            // No more reflection needed - finalize this chunk
-            self.finalize_chunk(
-                original_id,
-                store_name,
-                chunk_content,
-                chunk_index,
-                total_chunks,
-                source,
-                remaining_chunks,
-                chunks_added,
-                entities_extracted,
-                current_chunk_entities,
-                stdout,
-            );
-        }
-    }
-
-    /// Send a reflection check: "Did you miss any entities?"
-    #[allow(clippy::too_many_arguments)]
-    fn send_reflection_check(
-        &mut self,
-        original_id: Value,
-        store_name: String,
-        chunk_content: String,
-        chunk_index: usize,
-        total_chunks: usize,
-        source: Option<String>,
-        remaining_chunks: Vec<String>,
-        chunks_added: usize,
-        entities_extracted: usize,
-        current_chunk_entities: Vec<EntityTriple>,
-        reflection_iteration: usize,
-        stdout: &mut impl Write,
-    ) {
-        let prompt = reflection_prompt(&chunk_content, &current_chunk_entities);
-
-        self.send_sampling_request(
-            &prompt.system,
-            &prompt.user,
-            prompt.max_tokens,
-            PendingOperation::ReflectionCheck {
-                original_id,
-                store_name,
-                chunk_content,
-                chunk_index,
-                total_chunks,
-                source,
-                remaining_chunks,
-                chunks_added,
-                entities_extracted,
-                current_chunk_entities,
-                reflection_iteration,
-            },
-            stdout,
-        );
-    }
-
-    /// Handle reflection response - either extract more or finalize
-    #[allow(clippy::too_many_arguments)]
-    fn handle_reflection_response(
-        &mut self,
-        original_id: Value,
-        store_name: String,
-        chunk_content: String,
-        chunk_index: usize,
-        total_chunks: usize,
-        source: Option<String>,
-        remaining_chunks: Vec<String>,
-        chunks_added: usize,
-        entities_extracted: usize,
-        current_chunk_entities: Vec<EntityTriple>,
-        reflection_iteration: usize,
-        response: &str,
-        stdout: &mut impl Write,
-    ) {
-        let missed = response.to_lowercase().contains("yes");
-
-        if missed {
-            eprintln!(
-                "Chunk {}/{}: reflection says entities were missed, extracting more...",
-                chunk_index + 1,
-                total_chunks
-            );
-
-            // Do another extraction pass
-            self.send_continuation_extraction(
-                original_id,
-                store_name,
-                chunk_content,
-                chunk_index,
-                total_chunks,
-                source,
-                remaining_chunks,
-                chunks_added,
-                entities_extracted,
-                current_chunk_entities,
-                reflection_iteration + 1,
-                stdout,
-            );
-        } else {
-            eprintln!(
-                "Chunk {}/{}: reflection says extraction complete",
-                chunk_index + 1,
-                total_chunks
-            );
-
-            // Finalize this chunk
-            self.finalize_chunk(
-                original_id,
-                store_name,
-                chunk_content,
-                chunk_index,
-                total_chunks,
-                source,
-                remaining_chunks,
-                chunks_added,
-                entities_extracted,
-                current_chunk_entities,
-                stdout,
-            );
-        }
-    }
-
-    /// Send a continuation extraction request (after reflection said "yes")
-    #[allow(clippy::too_many_arguments)]
-    fn send_continuation_extraction(
-        &mut self,
-        original_id: Value,
-        store_name: String,
-        chunk_content: String,
-        chunk_index: usize,
-        total_chunks: usize,
-        source: Option<String>,
-        remaining_chunks: Vec<String>,
-        chunks_added: usize,
-        entities_extracted: usize,
-        current_chunk_entities: Vec<EntityTriple>,
-        reflection_iteration: usize,
-        stdout: &mut impl Write,
-    ) {
-        let prompt = continuation_extraction_prompt(&chunk_content, &current_chunk_entities);
-
-        self.send_sampling_request(
-            &prompt.system,
-            &prompt.user,
-            prompt.max_tokens,
-            PendingOperation::AddChunk {
-                original_id,
-                store_name,
-                chunk_content,
-                chunk_index,
-                total_chunks,
-                source,
-                remaining_chunks,
-                chunks_added,
-                entities_extracted,
-                current_chunk_entities,
-                reflection_iteration,
-            },
-            stdout,
-        );
-    }
-
-    /// Finalize a chunk - store entities and embeddings, then move to next chunk
-    #[allow(clippy::too_many_arguments)]
-    fn finalize_chunk(
-        &mut self,
-        original_id: Value,
-        store_name: String,
-        chunk_content: String,
-        chunk_index: usize,
-        total_chunks: usize,
-        source: Option<String>,
-        mut remaining_chunks: Vec<String>,
-        chunks_added: usize,
-        entities_extracted: usize,
-        entities: Vec<EntityTriple>,
-        stdout: &mut impl Write,
-    ) {
-        // Get embedder
-        let embedder = match get_embedder() {
-            Ok(e) => e,
-            Err(e) => {
-                self.send_final_response(self.tool_error(original_id, e), stdout);
-                return;
-            }
-        };
-
-        // Embed the chunk
-        let embedding = match embedder.embed(&chunk_content) {
-            Ok(e) => e,
-            Err(e) => {
-                self.send_final_response(self.tool_error(original_id, e.to_string()), stdout);
-                return;
-            }
-        };
-
-        // Open database
-        let db = match Database::open(&self.db_path()) {
-            Ok(d) => d,
-            Err(e) => {
-                self.send_final_response(self.tool_error(original_id, e.to_string()), stdout);
-                return;
-            }
-        };
-
-        // Ensure store exists with correct dimension
-        let store = match db.get_store(&store_name) {
-            Ok(s) => s,
-            Err(_) => match db.create_store(&store_name, embedder.dimension()) {
-                Ok(s) => s,
-                Err(e) => {
-                    self.send_final_response(self.tool_error(original_id, e.to_string()), stdout);
-                    return;
-                }
-            },
-        };
-
-        if store.dim != embedding.len() {
-            self.send_final_response(
-                self.tool_error(
-                    original_id,
-                    format!(
-                        "Dimension mismatch: store has {}, embedder produces {}",
-                        store.dim,
-                        embedding.len()
-                    ),
-                ),
-                stdout,
-            );
-            return;
-        }
-
-        // Add chunk with source indicating chunk index
-        let chunk_source = source.as_ref().map(|s| {
-            if total_chunks > 1 {
-                format!("{}#chunk{}", s, chunk_index + 1)
-            } else {
-                s.clone()
-            }
-        });
-
-        let chunk_id =
-            match db.add_chunk(&store_name, &chunk_content, chunk_source.as_deref(), None) {
-                Ok(id) => id,
-                Err(e) => {
-                    self.send_final_response(self.tool_error(original_id, e.to_string()), stdout);
-                    return;
-                }
-            };
-        // Lexical cache is now stale for this store; next recall rebuilds.
-        // Cheaper to invalidate here than after the whole batch finishes —
-        // multi-chunk add_document writes one chunk per sampling callback,
-        // so we'd otherwise serve N-1 stale recalls during a single ingest.
-        self.invalidate_lexical(&store_name);
-
-        // Store the canonical embedding
-        if let Err(e) = db.set_chunk_embedding(chunk_id, &embedding) {
-            self.send_final_response(self.tool_error(original_id, e.to_string()), stdout);
-            return;
-        }
-
-        // Commit the checkpoint and exact graph-object involvement together.
-        // MCP sampling does not expose the selected client model, so record the
-        // stable execution surface rather than inventing a model identity.
-        let model = "mcp-sampling";
-        let provenance_nonce =
-            extraction_provenance_nonce(&store_name, chunk_id, model, &chunk_content);
-        let response = serde_json::to_string(&entities).unwrap_or_default();
-        let triples = entities
-            .iter()
-            .map(|entity| EntityInput {
-                head: entity.head.clone(),
-                head_type: entity.head_type.clone(),
-                relation: entity.relation.clone(),
-                tail: entity.tail.clone(),
-                tail_type: entity.tail_type.clone(),
-                properties: None,
+    /// Groups from `in`/`groups` (arrays) plus a deprecated `store` alias.
+    fn groups_arg(args: &Value, key: &str) -> Vec<String> {
+        let mut groups: Vec<String> = args
+            .get(key)
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
             })
-            .collect::<Vec<_>>();
-        let result = ExtractResult {
-            chunk_id,
-            model: model.into(),
-            provenance_nonce,
-            response,
-        };
-        let entity_count = match apply_extracted_entities(&db, &store_name, &result, &triples) {
-            Ok(count) => count,
-            Err(e) => {
-                self.send_final_response(self.tool_error(original_id, e.to_string()), stdout);
-                return;
-            }
-        };
+            .unwrap_or_default();
+        if let Some(s) = args.get("store").and_then(|v| v.as_str()) {
+            eprintln!("warning: `store` is deprecated; use `in`");
+            groups.push(s.to_string());
+        }
+        groups
+    }
 
-        let new_chunks_added = chunks_added + 1;
-        let new_entities_extracted = entities_extracted + entity_count;
-
-        eprintln!(
-            "Chunk {}/{} complete: {} entities extracted",
-            chunk_index + 1,
-            total_chunks,
-            entity_count
-        );
-
-        // Check if there are more chunks to process
-        if remaining_chunks.is_empty() {
-            // All done - send final success response
-            let response = self.tool_success(
-                original_id,
-                format!(
-                    "Added document to '{}': {} chunks, {} entity relations extracted",
-                    store_name, new_chunks_added, new_entities_extracted
-                ),
-            );
-            self.send_final_response(response, stdout);
-        } else {
-            // Process next chunk
-            let next_chunk = remaining_chunks.remove(0);
-            self.process_chunk(
-                original_id,
-                store_name,
-                next_chunk,
-                source,
-                ChunkBatchProgress {
-                    chunk_index: chunk_index + 1,
-                    total_chunks,
-                    remaining_chunks,
-                    chunks_added: new_chunks_added,
-                    entities_extracted: new_entities_extracted,
-                },
-                stdout,
-            );
+    fn spawn_worker(&self) {
+        if let Err(e) = graphrag_worker::spawn_detached(&self.data_dir) {
+            eprintln!("warning: could not start the worker: {e}");
         }
     }
 
-    /// Helper to send a final response to stdout
-    fn send_final_response(&self, response: JsonRpcResponse, stdout: &mut impl Write) {
-        if let Err(e) = writeln!(stdout, "{}", serde_json::to_string(&response).unwrap()) {
-            eprintln!("Write error: {}", e);
-        }
-        let _ = stdout.flush();
-    }
-
-    fn tool_summarize_community(
-        &mut self,
+    /// Store, chunk and hand off to the worker; never calls back to the agent.
+    fn add(
+        &self,
         args: &Value,
         id: Value,
-        stdout: &mut impl Write,
-    ) -> Option<JsonRpcResponse> {
-        let community_id = match args.get("community_id").and_then(|v| v.as_i64()) {
-            Some(c) => c,
-            None => {
-                return Some(self.tool_error(id, "Missing 'community_id' argument".to_string()));
-            }
-        };
-
-        // store_name is captured but not needed after community lookup; the
-        // community_id is store-scoped via FK on the chunks table.
-        let _ = self.get_store_name(args);
-
-        // Get community entities
-        let db = match Database::open(&self.db_path()) {
-            Ok(d) => d,
-            Err(e) => return Some(self.tool_error(id, e.to_string())),
-        };
-
-        let entities = match db.get_community_entities(community_id) {
-            Ok(e) => e,
-            Err(e) => return Some(self.tool_error(id, e.to_string())),
-        };
-
-        if entities.is_empty() {
-            return Some(self.tool_error(id, "Community has no entities".to_string()));
-        }
-
-        // Build context with entities and their relations
-        let mut context = String::from("Entities in this community:\n");
-        let entity_names: Vec<String> = entities.iter().map(|e| e.name.clone()).collect();
-
-        for entity in &entities {
-            let entity_type = entity.entity_type.as_deref().unwrap_or("unknown");
-            context.push_str(&format!("- {} ({})\n", entity.name, entity_type));
-
-            // Get relations for this entity
-            if let Ok(relations) = db.get_relations_for_entity(entity.id) {
-                for rel in relations {
-                    let other_id = if rel.head_id == entity.id {
-                        rel.tail_id
-                    } else {
-                        rel.head_id
-                    };
-                    if let Ok(other) = db.get_entity_by_id(other_id)
-                        && entity_names.contains(&other.name)
-                    {
-                        context.push_str(&format!("  -> {} -> {}\n", rel.relation, other.name));
-                    }
-                }
-            }
-        }
-
-        let system_prompt = "You are a summarization system. Given a list of entities and their relationships, write a concise 1-2 sentence summary that captures the key theme or topic of this cluster. Output ONLY the summary text, nothing else.";
-
-        self.send_sampling_request(
-            system_prompt,
-            &context,
-            200,
-            PendingOperation::SummarizeCommunity {
-                original_id: id,
-                community_id,
-                entities: entity_names,
-            },
-            stdout,
-        );
-
-        None // Response will come later
-    }
-
-    fn complete_summarize_community(
-        &self,
-        id: Value,
-        community_id: i64,
-        summary: &str,
+        profile: ChunkerProfile,
+        default_group: &str,
     ) -> JsonRpcResponse {
+        let content = match args.get("content").and_then(|v| v.as_str()) {
+            Some(c) => c,
+            None => return self.tool_error(id, "Missing 'content' argument".to_string()),
+        };
+        let source = args
+            .get("source")
+            .or_else(|| args.get("file_path"))
+            .and_then(|v| v.as_str());
+        let doc_key = args.get("doc_key").and_then(|v| v.as_str());
+        let mut groups = Self::groups_arg(args, "groups");
+        if groups.is_empty() {
+            groups.push(default_group.to_string());
+        }
+        let groups: Vec<&str> = groups.iter().map(String::as_str).collect();
         let db = match Database::open(&self.db_path()) {
             Ok(d) => d,
             Err(e) => return self.tool_error(id, e.to_string()),
         };
-
-        if let Err(e) = db.update_community_summary(community_id, summary) {
-            return self.tool_error(id, e.to_string());
+        if db.get_store(&self.default_store).is_err() {
+            let dim = embedder_model().dimension();
+            if let Err(e) = db.create_store(&self.default_store, dim) {
+                return self.tool_error(id, e.to_string());
+            }
         }
-
+        let outcome = match db.add_document(&AddDocument {
+            store: &self.default_store,
+            content,
+            origin: Origin::Source,
+            source,
+            doc_key,
+            title: None,
+            groups: &groups,
+            surface: "mcp",
+            profile: &profile,
+        }) {
+            Ok(o) => o,
+            Err(e) => return self.tool_error(id, e.to_string()),
+        };
+        let (document_id, existing) = match outcome {
+            AddOutcome::Created { document_id } | AddOutcome::Replaced { document_id, .. } => {
+                (document_id, false)
+            }
+            AddOutcome::Existing { document_id, .. } => (document_id, true),
+        };
+        let chunks = db
+            .document_chunks(document_id)
+            .map(|c| c.len())
+            .unwrap_or(0);
+        self.invalidate_lexical(&self.default_store);
+        self.spawn_worker();
         self.tool_success(
             id,
-            format!(
-                "Updated community {} summary: {}",
-                community_id,
-                summary.trim()
-            ),
+            json!({
+                "document_id": document_id,
+                "chunks": chunks,
+                "existing": existing,
+                "groups": groups,
+                "note": "Stored. Embedding, extraction and clustering run in the background worker; see graphrag_status."
+            })
+            .to_string(),
+        )
+    }
+
+    fn tool_add_document(&self, args: &Value, id: Value) -> JsonRpcResponse {
+        self.add(
+            args,
+            id,
+            ChunkerProfile::default_markdown(),
+            "conversations",
+        )
+    }
+
+    fn tool_add_code(&self, args: &Value, id: Value) -> JsonRpcResponse {
+        let profile = ChunkerProfile {
+            kind: "code",
+            ..ChunkerProfile::default_markdown()
+        };
+        self.add(args, id, profile, "code")
+    }
+
+    /// The stored summary and its status. Summaries are written by the
+    /// worker; this never samples the client.
+    fn tool_summarize_community(&self, args: &Value, id: Value) -> JsonRpcResponse {
+        let community_id = match args.get("community_id").and_then(|v| v.as_i64()) {
+            Some(c) => c,
+            None => return self.tool_error(id, "Missing 'community_id' argument".to_string()),
+        };
+        let db = match Database::open(&self.db_path()) {
+            Ok(d) => d,
+            Err(e) => return self.tool_error(id, e.to_string()),
+        };
+        let summary = db
+            .list_communities(&self.default_store)
+            .ok()
+            .and_then(|cs| cs.into_iter().find(|c| c.id == community_id))
+            .and_then(|c| c.summary);
+        let status = db
+            .step_fp(SubjectKind::Community, community_id, Step::Summary)
+            .ok()
+            .flatten()
+            .map(|(_, state)| state);
+        self.tool_success(
+            id,
+            json!({
+                "community_id": community_id,
+                "summary": summary,
+                "status": status.unwrap_or_else(|| "pending".into()),
+            })
+            .to_string(),
+        )
+    }
+
+    fn tool_status(&self, id: Value) -> JsonRpcResponse {
+        let db = match Database::open(&self.db_path()) {
+            Ok(d) => d,
+            Err(e) => return self.tool_error(id, e.to_string()),
+        };
+        let mut cfg = graphrag_worker::WorkerConfig::from_env(self.data_dir.clone());
+        cfg.store = self.default_store.clone();
+        let model = embedder_model();
+        let sc = cfg.static_config_with(graphrag_core::embedder_model_id(model), model.dimension());
+        let report = match db.status_report(&sc) {
+            Ok(r) => r,
+            Err(e) => return self.tool_error(id, e.to_string()),
+        };
+        let worker_running = matches!(graphrag_worker::lock::acquire(&self.data_dir), Ok(None));
+        let state = db.worker_state().unwrap_or_default();
+        self.tool_success(
+            id,
+            json!({
+                "report": report,
+                "complete": report.is_complete(),
+                "worker_running": worker_running,
+                "worker_state": state,
+            })
+            .to_string(),
         )
     }
 
@@ -1535,31 +669,25 @@ impl McpServer {
             Some(q) => q,
             None => return self.tool_error(id, "Missing 'query' argument".to_string()),
         };
-
-        let embedder = match get_embedder() {
-            Ok(e) => e,
-            Err(e) => return self.tool_error(id, e),
-        };
-
-        let embedding = match embedder.embed(query) {
-            Ok(e) => e,
-            Err(e) => return self.tool_error(id, e.to_string()),
-        };
-
-        let store_name = self.get_store_name(args);
         let top = args.get("top").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
-        let expand = args.get("expand").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
-
+        let groups = Self::groups_arg(args, "in");
+        let groups: Vec<&str> = groups.iter().map(String::as_str).collect();
         let db = match Database::open(&self.db_path()) {
             Ok(d) => d,
             Err(e) => return self.tool_error(id, e.to_string()),
         };
-
-        let store = match db.get_store(&store_name) {
+        let store = match db.get_store(&self.default_store) {
             Ok(s) => s,
+            Err(_) => return self.tool_success(id, "No memory yet.".to_string()),
+        };
+        let embedder = match get_embedder() {
+            Ok(e) => e,
+            Err(e) => return self.tool_error(id, e),
+        };
+        let embedding = match embedder.embed(query) {
+            Ok(e) => e,
             Err(e) => return self.tool_error(id, e.to_string()),
         };
-
         if embedding.len() != store.dim {
             return self.tool_error(
                 id,
@@ -1570,62 +698,59 @@ impl McpServer {
                 ),
             );
         }
-
-        // Hybrid recall: brute-force cosine (semantic) ∪ leit BM25 (lexical), fused via RRF.
-        // Pull candidate_k per lane so RRF has overlap to fuse over.
-        let candidate_k = top.max(5) * 4;
-
-        let vector_hits = match BruteForceVectorSource::for_store(&db, &store_name) {
-            Ok(source) => match source.top_candidates(&embedding, candidate_k) {
-                Ok(r) => r,
-                Err(e) => return self.tool_error(id, e.to_string()),
-            },
-            Err(e) => return self.tool_error(id, e.to_string()),
-        };
-
-        let lexical_hits = match self.cached_lexical_for(&db, &store_name) {
-            Ok(Some(idx)) => match idx.search(query, candidate_k) {
-                Ok(h) => h,
-                Err(e) => return self.tool_error(id, e.to_string()),
-            },
-            Ok(None) => Vec::new(),
+        let lexical = match self.cached_lexical_for(&db, &self.default_store) {
+            Ok(l) => l,
             Err(e) => return self.tool_error(id, e),
         };
-
-        if vector_hits.is_empty() && lexical_hits.is_empty() {
-            return self.tool_success(id, String::new());
+        let now = db.now_utc().unwrap_or_default();
+        let hits = match db.hybrid_recall(
+            &self.default_store,
+            query,
+            &embedding,
+            &groups,
+            top,
+            lexical.as_deref(),
+            &now,
+        ) {
+            Ok(h) => h,
+            Err(e) => return self.tool_error(id, e.to_string()),
+        };
+        let ids: Vec<i64> = hits.iter().map(|h| h.chunk_id).collect();
+        if db.escalate_chunks(&ids).unwrap_or(0) > 0 {
+            self.spawn_worker();
         }
-
-        let vector_ranked: Vec<leit_fusion::RankedResult> = vector_hits
-            .iter()
-            .enumerate()
-            .map(|(i, h)| leit_fusion::RankedResult::new(h.chunk_id.to_string(), i + 1))
-            .collect();
-        let lexical_ranked: Vec<leit_fusion::RankedResult> = lexical_hits
-            .iter()
-            .enumerate()
-            .map(|(i, (cid, _))| leit_fusion::RankedResult::new(cid.to_string(), i + 1))
-            .collect();
-        let fused = leit_fusion::fuse_default(&[vector_ranked, lexical_ranked]);
-
-        // Translate fused output back into VectorCandidate so the existing
-        // format_search_results + graph-expansion path keeps working unchanged.
-        // VectorCandidate.score carries the RRF score here (higher = better).
-        let results: Vec<VectorCandidate> = fused
-            .iter()
-            .take(top)
-            .filter_map(|f| {
-                f.id.parse::<i64>().ok().map(|chunk_id| VectorCandidate {
-                    chunk_id,
-                    score: f.score as f32,
-                })
-            })
-            .collect();
-
-        match self.format_search_results(&db, &results, expand) {
-            Ok(text) => self.tool_success(id, text),
-            Err(e) => self.tool_error(id, e),
+        if hits.is_empty() {
+            return self.tool_success(id, "No results.".to_string());
         }
+        let mut text = String::from("## Recall results\n\n");
+        for (i, h) in hits.iter().enumerate() {
+            let opt = |v: Option<String>| v.unwrap_or_else(|| "-".into());
+            text.push_str(&format!(
+                "### {}. chunk {} · rrf {:.4} · vec {} · lex {} · graph {}\n",
+                i + 1,
+                h.chunk_id,
+                h.rrf,
+                opt(h.vec.map(|s| format!("{s:.3}"))),
+                opt(h.lex.map(|s| format!("{s:.3}"))),
+                opt(h.graph.map(|s| format!("{s:.3}"))),
+            ));
+            text.push_str(&format!(
+                "groups: {} · section: {} · source: {}\n\n{}\n\n",
+                if h.groups.is_empty() {
+                    "-".into()
+                } else {
+                    h.groups.join(", ")
+                },
+                if h.heading_path.is_empty() {
+                    "-".into()
+                } else {
+                    h.heading_path.join(" › ")
+                },
+                h.source.as_deref().unwrap_or("-"),
+                h.content
+            ));
+        }
+        self.tool_success(id, text)
     }
 
     fn tool_stores(&self, id: Value) -> JsonRpcResponse {
@@ -2156,10 +1281,31 @@ impl McpServer {
             Err(e) => return self.tool_error(id, e.to_string()),
         };
 
-        let results = match source.top_candidates(&embedding, top) {
-            Ok(r) => r,
+        let groups = Self::groups_arg(args, "in");
+        let groups: Vec<&str> = groups.iter().map(String::as_str).collect();
+        let mut allowed = match db.active_chunk_ids(&store_name) {
+            Ok(a) => a,
             Err(e) => return self.tool_error(id, e.to_string()),
         };
+        if !groups.is_empty() {
+            match db.chunk_ids_in_groups(&store_name, &groups) {
+                Ok(g) => allowed.retain(|c| g.contains(c)),
+                Err(e) => return self.tool_error(id, e.to_string()),
+            }
+        }
+        let results: Vec<VectorCandidate> =
+            match source.top_candidates(&embedding, source.len().max(1)) {
+                Ok(r) => r
+                    .into_iter()
+                    .filter(|h| allowed.contains(&h.chunk_id))
+                    .take(top)
+                    .collect(),
+                Err(e) => return self.tool_error(id, e.to_string()),
+            };
+        let ids: Vec<i64> = results.iter().map(|r| r.chunk_id).collect();
+        if db.escalate_chunks(&ids).unwrap_or(0) > 0 {
+            self.spawn_worker();
+        }
 
         match self.format_search_results(&db, &results, expand) {
             Ok(text) => self.tool_success(id, text),
