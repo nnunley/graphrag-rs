@@ -121,6 +121,7 @@ pub struct StaticConfig {
     pub chunker: ChunkerProfile,
     pub extraction: ExtractionConfig,
     pub community: CommunityConfig,
+    pub lift: crate::generalize::LiftConfig,
 }
 
 impl ExpectedFingerprints for StaticConfig {
@@ -172,6 +173,9 @@ impl ExpectedFingerprints for StaticConfig {
                         .map_err(|err| GraphRagError::Other(err.to_string()))?,
                     )
                 }
+            }
+            (SubjectKind::Graph, Step::Generalize) => {
+                Some(db.generalize_input_fp(&self.store, &self.lift)?)
             }
             (SubjectKind::Graph, Step::Communities) => {
                 Some(db.graph_input_fp(&self.store, &self.community)?)

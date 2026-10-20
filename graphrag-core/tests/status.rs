@@ -28,6 +28,7 @@ fn cfg() -> StaticConfig {
             glean_max_rounds: 0,
         },
         community: CommunityConfig::default(),
+        lift: graphrag_core::generalize::LiftConfig::default(),
     }
 }
 
@@ -86,21 +87,16 @@ impl Fx {
         }
     }
     fn finish_graph(&self) {
-        let fp = self
-            .cfg
-            .expected(&self.db, SubjectKind::Graph, 0, Step::Communities)
-            .unwrap()
-            .unwrap();
-        self.db
-            .record_step(
-                SubjectKind::Graph,
-                0,
-                Step::Communities,
-                &fp,
-                StepState::Current,
-                None,
-            )
-            .unwrap();
+        for step in [Step::Generalize, Step::Communities] {
+            let fp = self
+                .cfg
+                .expected(&self.db, SubjectKind::Graph, 0, step)
+                .unwrap()
+                .unwrap();
+            self.db
+                .record_step(SubjectKind::Graph, 0, step, &fp, StepState::Current, None)
+                .unwrap();
+        }
     }
     fn work(&self) -> Vec<(SubjectKind, i64, Step)> {
         self.db
@@ -126,6 +122,23 @@ fn matching_fp_is_not_work() {
     let f = fx();
     let c = f.add("a note", &[], Origin::Source)[0];
     f.complete(c);
+    // Generalization runs first, then clustering.
+    assert_eq!(f.work(), vec![(SubjectKind::Graph, 0, Step::Generalize)]);
+    let fp = f
+        .cfg
+        .expected(&f.db, SubjectKind::Graph, 0, Step::Generalize)
+        .unwrap()
+        .unwrap();
+    f.db.record_step(
+        SubjectKind::Graph,
+        0,
+        Step::Generalize,
+        &fp,
+        StepState::Current,
+        None,
+    )
+    .unwrap();
+    assert_eq!(f.work(), vec![(SubjectKind::Graph, 0, Step::Communities)]);
     assert!(f.work().iter().all(|(k, _, _)| *k != SubjectKind::Chunk));
 }
 
@@ -220,10 +233,23 @@ fn communities_wait_for_chunk_work() {
     let c = f.add("a note", &[], Origin::Source)[0];
     assert!(!f.work().iter().any(|(k, _, _)| *k == SubjectKind::Graph));
     f.complete(c);
-    assert!(
-        f.work()
-            .contains(&(SubjectKind::Graph, 0, Step::Communities))
-    );
+    // Generalization runs first, then clustering.
+    assert_eq!(f.work(), vec![(SubjectKind::Graph, 0, Step::Generalize)]);
+    let fp = f
+        .cfg
+        .expected(&f.db, SubjectKind::Graph, 0, Step::Generalize)
+        .unwrap()
+        .unwrap();
+    f.db.record_step(
+        SubjectKind::Graph,
+        0,
+        Step::Generalize,
+        &fp,
+        StepState::Current,
+        None,
+    )
+    .unwrap();
+    assert_eq!(f.work(), vec![(SubjectKind::Graph, 0, Step::Communities)]);
 }
 
 #[test]
@@ -231,20 +257,7 @@ fn current_communities_are_not_work() {
     let f = fx();
     let c = f.add("a note", &[], Origin::Source)[0];
     f.complete(c);
-    let fp = f
-        .cfg
-        .expected(&f.db, SubjectKind::Graph, 0, Step::Communities)
-        .unwrap()
-        .unwrap();
-    f.db.record_step(
-        SubjectKind::Graph,
-        0,
-        Step::Communities,
-        &fp,
-        StepState::Current,
-        None,
-    )
-    .unwrap();
+    f.finish_graph();
     assert!(f.work().is_empty());
 }
 
@@ -270,10 +283,7 @@ fn failed_chunks_do_not_block_communities() {
         )
         .unwrap();
     }
-    assert!(
-        f.work()
-            .contains(&(SubjectKind::Graph, 0, Step::Communities))
-    );
+    assert!(f.work().iter().any(|(k, _, _)| *k == SubjectKind::Graph));
 }
 
 #[test]

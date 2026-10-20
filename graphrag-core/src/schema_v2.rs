@@ -281,6 +281,12 @@ pub(crate) fn apply_v2(conn: &Connection) -> Result<(), GraphRagError> {
         "UPDATE entities SET name_key = lower(trim(name)) WHERE name_key IS NULL;
          CREATE INDEX IF NOT EXISTS idx_entities_name_key ON entities(store, name_key);",
     )?;
+    for (relation, broader) in crate::synonyms::RELATION_GENLS_SEED {
+        conn.execute(
+            "INSERT OR IGNORE INTO relation_genls (relation, broader, origin) VALUES (?1, ?2, 'seed')",
+            params![relation, broader],
+        )?;
+    }
     conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
     Ok(())
 }

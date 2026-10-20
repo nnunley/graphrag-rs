@@ -168,10 +168,20 @@ pub fn normalize_entity_type(raw: &str) -> &'static str {
 }
 
 /// The match key for an entity name: trimmed, internal whitespace
-/// collapsed, case-folded. The display form is kept separately.
+/// collapsed, head noun singularized, case-folded. The display form is
+/// kept separately.
 pub fn normalize_entity_name(raw: &str) -> String {
-    display_name(raw).to_lowercase()
+    crate::generalize::base_form(&display_name(raw)).to_lowercase()
 }
+
+/// Seed relation hierarchy (Cyc genlPreds): `(relation, broader)`.
+pub const RELATION_GENLS_SEED: &[(&str, &str)] = &[
+    ("pushes_to", "exchanges_data_with"),
+    ("pulls_from", "exchanges_data_with"),
+    ("syncs_with", "exchanges_data_with"),
+    ("chosen_over", "compared_with"),
+    ("preferred_over", "compared_with"),
+];
 
 /// Trimmed with internal whitespace collapsed; case kept.
 pub fn display_name(raw: &str) -> String {
