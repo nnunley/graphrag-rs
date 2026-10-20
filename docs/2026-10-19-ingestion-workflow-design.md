@@ -84,7 +84,7 @@ These would count as failures even if everything else worked:
 |---|---|---|
 | Document | A note, paper, file or doc page; the unit that gets added | `documents` (content-addressed) |
 | Section | A heading-delimited part of a document (markdown headings, nested by level). Notes without headings have none | `sections`, also an entity of type `section` |
-| Chunk | A token-bounded span inside one section (or inside a heading-less document); the unit of embedding and extraction | `chunks` |
+| Chunk | A token-bounded span inside one section (or inside a heading-less document); the unit of embedding and extraction. A chunk stores no text: it is `(document, start, end)` plus metadata (fingerprint, embedding, step status) | `chunks` |
 | Group | A named grouping: `papers`, `conversations`, `operation`, `mica-docs`, `9front-kb`, or any new one | an entity of type `group` |
 | Entity | Something extracted from text: a person, software, concept, … | `entities` |
 
@@ -152,7 +152,10 @@ All fingerprints use the M0 encoding: `sha256:<hex>` from `token::fingerprint_pa
   - Adding new text under an existing `doc_key` creates a new document that `replaces` the previous one with that key.
   - Notes have no `doc_key` and are append-only, matching brain: a correction is a new note, and an explicit `replaces` assertion is how one note retires another.
   - Without a key, nothing is auto-versioned. Adding text whose `content_fp` already exists creates no document. It records an add event (`document_adds`: document, source, surface, time) and asserts any new group edges. Adding the same text with the same groups is a no-op apart from the add event.
-- **Chunks** gain `document_id`, `start`, `end` (byte offsets from `chunker::chunk_spans` or the code chunker) and `content_fp`.
+- **Chunks are spans, not copies** (Norman, 2026-10-20). A chunk row is `document_id`, `section_id?`, `start`, `end` (byte offsets from `chunker::chunk_spans` or the code chunker), `content_fp`, plus metadata (`source`, `metadata`, `created_at`); its embedding lives in `chunk_embeddings` and its pipeline state in `step_status`. The `chunks.content` column is dropped. The text is always `documents.content[start..end]`, and it is safe to slice because a document's text is immutable: a database trigger rejects any `UPDATE` of `documents.content`, and an edit is a new document (see `doc_key`). Sections are spans the same way.
+  - Readers (lexical index, recall, export, MCP, Nushell, Python) get chunk text from one accessor that slices the document, so overlapping chunks cost no storage and a chunk can never drift from its source.
+  - SQLite's `substr` counts characters on `TEXT`, so SQL slicing goes through `CAST(substr(CAST(d.content AS BLOB), start + 1, end - start) AS TEXT)`; *builder's call* whether that lives in a view or in Rust.
+  - Opening a v1 database converts each existing chunk into a document holding its text and one chunk spanning `0..len`, then rebuilds `chunks` without `content`. Identical texts share one document. Nothing is lost; `migrate v2` then regroups documents.
 - **Sections are nodes** (Norman, 2026-10-19):
   - Markdown documents are parsed into a section tree from their headings: document `has_part` top-level sections, a section `has_part` its subsections, and a section `has_part` its chunks.
   - Each section records its heading text, level, ordinal, heading path (`approval-workflow.md › Load the Workflow`), byte span, and `content_fp`.

@@ -21,6 +21,7 @@
 - Every task ends with `cargo fmt --all --check` and `cargo clippy --release --workspace --all-targets -- -D warnings` clean.
 - Fingerprints: lowercase `sha256:<64 hex>` from `token::fingerprint_parts`, with a distinct domain tag per step (`graphrag-step-<name>-v1`).
 - LLM: `GRAPHRAG_LLM_BASE_URL` default `http://ndn.lan:8080/v1`; `GRAPHRAG_LLM_MODEL` default `qwen3.8-27b`; `GRAPHRAG_LLM_CONCURRENCY` default `4`.
+- Chunks store no text: a chunk is `(document_id, start, end)` byte offsets plus metadata, and its text is `documents.content[start..end]`. `documents.content` is immutable (trigger).
 - Chunking: 2,000 characters, 200 overlap, markdown-aware, never crossing a section boundary, with a hard cap of 2,000 characters per chunk.
 - Priorities: `2` = touched by recall, `1` = newly added, `0` = backlog.
 - Worker exit codes: `0` done, `69` model not served / endpoint unavailable, `75` LLM outage (M consecutive transport failures), `64` usage.
@@ -93,7 +94,10 @@ Core tests go in `graphrag-core/tests/<module>.rs`, one file per new module, ope
   - `documents(id, content, content_fp UNIQUE, doc_key, origin TEXT NOT NULL DEFAULT 'source' CHECK(origin IN ('source','compiled')), source, title, node_id, created_at)`
   - `document_adds(id, document_id, source, surface, added_at)`
   - `sections(id, document_id, parent_id, heading, level, ordinal, heading_path, start, end, content_fp, node_id)`
-  - `chunks` gains `document_id, section_id, start, end, content_fp`
+  - `chunks` is rebuilt as `chunks(id, store, document_id NOT NULL REFERENCES documents(id), section_id, start, end, content_fp, source, metadata, created_at)`, with **no `content` column**. Each v1 chunk becomes a document holding its text (identical texts share one document, by `content_fp`) and a chunk spanning `0..len(text)` that keeps its id, so `chunk_embeddings` and `chunk_entities` stay attached.
+  - trigger `documents_immutable`: `BEFORE UPDATE OF content ON documents` → `RAISE(ABORT, 'documents are immutable')`
+  - `pub fn Database::chunk_text(&self, chunk_id: i64) -> Result<String, GraphRagError>`, and every query that builds a `Chunk` fills `Chunk.content` by slicing the document (`CAST(substr(CAST(d.content AS BLOB), c.start + 1, c.end - c.start) AS TEXT)`). The public `Chunk` struct keeps `content`, so readers in `lexical.rs`, `mr.rs`, `export.rs`, the CLI, MCP, Nushell and Python don't change.
+  - `add_chunk(store, content, …)` keeps its signature until Task 6: it inserts or reuses the document and adds one chunk spanning it.
   - `assertions(id, head_id, relation, tail_id, asserter, reason, context, asserted_at, retracted_at)`, where `context` is nullable
   - `step_status(subject_kind, subject_id, step, fp, state, attempts, last_error, next_try_at, priority, updated_at, PRIMARY KEY(subject_kind, subject_id, step))`
   - `attempts(attempt_fp PK, chunk_id, model, profile, prompt_version, schema_version, outcome, response_sha256, raw_response, unmapped_relations, rejected_entities, created_at)`
@@ -113,7 +117,9 @@ Core tests go in `graphrag-core/tests/<module>.rs`, one file per new module, ope
 - [ ] **Step 1: Write the failing tests**
   - `open_sets_wal_and_busy_timeout`: `journal_mode` == `"wal"`, `busy_timeout` == 5000, `foreign_keys` == 1.
   - `open_twice_is_idempotent_at_version_2`: open, close, reopen; `schema_version()` == 2 both times; every v2 table exists (`sqlite_master`).
-  - `v1_database_upgrades_in_place`: create the v1 tables with raw `rusqlite` using the current `init_schema` DDL (copy it into the test as a constant), insert 2 chunks, then open with `Database::open`. The chunks survive and `schema_version()` == 2.
+  - `v1_database_upgrades_in_place`: create the v1 tables with raw `rusqlite` using the current `init_schema` DDL (copy it into the test as a constant), insert 3 chunks (two with identical text, one containing `é漢🙂`) and an embedding for one, then open with `Database::open`. `schema_version()` == 2; `chunks` has no `content` column (`PRAGMA table_info`); the 3 chunk ids survive with the same `chunk_text`; there are 2 documents; the embedding is still attached.
+  - `chunk_text_slices_document_bytes` (Review Focus 1): a document `"aé漢🙂b"` with chunks at every char-boundary span; the SQL slice equals `&text[start..end]` for each.
+  - `document_text_is_immutable`: `UPDATE documents SET content = 'x'` fails with `documents are immutable`.
   - `concurrent_writer_waits_instead_of_failing` (Review Focus 3): two `Database` handles on one file, thread A holds a write transaction for 300 ms while thread B calls `add_chunk`; B succeeds and both rows exist.
 - [ ] **Step 2: Run** `cargo test --release -p graphrag-core --test schema_v2`. Expected: FAIL (`schema_version` not found).
 - [ ] **Step 3: Implement** `apply_v2` (DDL above, `CREATE ... IF NOT EXISTS`, `ALTER TABLE ... ADD COLUMN` guarded by `PRAGMA table_info`) and the pragmas in `open`.
@@ -193,7 +199,7 @@ Core tests go in `graphrag-core/tests/<module>.rs`, one file per new module, ope
 **Interfaces:**
 - Consumes: `parse_sections` (Task 3), `chunker::chunk_spans`, `ChunkerProfile` (Task 2), `code_chunker` for `kind == "code"`.
 - Produces:
-  - `pub struct PlannedChunk { pub section: Option<usize> /* index into sections */, pub start: usize, pub end: usize, pub text: String, pub content_fp: String /* fingerprint_text */ }`
+  - `pub struct PlannedChunk { pub section: Option<usize> /* index into sections */, pub start: usize, pub end: usize, pub content_fp: String /* fingerprint_text of text[start..end] */ }` (no copy of the text)
   - `pub fn plan_chunks(text: &str, profile: &ChunkerProfile) -> (Vec<SectionSpan>, Vec<PlannedChunk>)`
 - Rule: chunk each *leaf-most text region* separately: a section's own text, excluding its subsections' spans. Regions ≤ `size` become one chunk. Longer regions go through `chunk_spans` with `size`/`overlap`, applied to that region only.
 
