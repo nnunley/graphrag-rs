@@ -13,7 +13,7 @@
 
 **Tech Stack:** Rust 2024 workspace, rusqlite 0.32 (bundled), text-splitter 0.29 (markdown), ureq 2.12, sha2, the existing `leiden.rs`, fastembed (Nomic, 768-dim), llama.cpp `/v1/chat/completions`.
 
-**Spec:** `docs/2026-10-19-ingestion-workflow-design.md` (revision 4, approved by Norman 2026-10-19). Read it before every task. When this plan and the spec disagree, the spec wins; stop and report the conflict.
+**Spec:** `docs/2026-10-19-ingestion-workflow-design.md` (revision 5, approved by Norman 2026-10-19). Read it before every task. When this plan and the spec disagree, the spec wins; stop and report the conflict.
 
 ## Global Constraints
 
@@ -55,6 +55,8 @@
 | `graphrag-core/src/status.rs` (create) | `step_status`, next-work query, escalation, report |
 | `graphrag-core/src/attempts.rs` (create) | extraction attempts, instances, supersession, GC |
 | `graphrag-core/src/weights.rs` (create) | support counts, Leiden projection |
+| `graphrag-core/src/generalize.rs` (create) | class canonicalization, `relation_genls`, lifted class edges with G² admission, IC floor |
+| `graphrag-core/src/salience.rs` (create) | use log, ACT-R salience, dormancy |
 | `graphrag-core/src/community_runs.rs` (create) | run build/replace, gate |
 | `graphrag-core/src/summaries.rs` (create) | summary planning, gates, reuse |
 | `graphrag-core/src/synonyms.rs`, `entity_types.rs` (modify) | vocabulary additions |
@@ -101,6 +103,11 @@ Core tests go in `graphrag-core/tests/<module>.rs`, one file per new module, ope
   - `communities` gains `run_id, fp`
   - `summaries(community_fp PK, summary, model, prompt_version, created_at)`
   - `entities` gains `kind TEXT NOT NULL DEFAULT 'entity'`
+  - `uses(id, item_kind, item_id, at, kind /* mention|recall|assert */, source_id, weight)`, indexed on `(item_kind, item_id)`
+  - `relation_genls(relation TEXT PRIMARY KEY, broader TEXT NOT NULL, origin /* seed|llm */, created_at)`
+  - `class_aliases(alias TEXT PRIMARY KEY, class_id)`, the canonicalization map for class names
+  - `lifted_edges(id, relation, head_class, tail_class, pairs, g2, admitted, fp, updated_at)` and `lifted_from(lifted_id, relation_id)` (`derived_from`)
+  - `entities` and `relations` gain `salience REAL`, `edge_status TEXT NOT NULL DEFAULT 'active' CHECK(edge_status IN ('active','dormant','implied'))`
   - `worker_state(key TEXT PRIMARY KEY, value TEXT, updated_at)`, which holds `last_llm_ok_at`, `last_llm_error`, `last_run_started_at` and `last_run_finished_at`
 
 - [ ] **Step 1: Write the failing tests**
@@ -130,7 +137,7 @@ Core tests go in `graphrag-core/tests/<module>.rs`, one file per new module, ope
   - `summary_fp(input: &SummaryInput, model: &str, prompt_version: &str)`
 - Also produces:
   - `pub struct ChunkerProfile { kind: &'static str /* "markdown-sections" | "code" */, size: usize, overlap: usize }` with `ChunkerProfile::default_markdown()` = `("markdown-sections", 2000, 200)`.
-  - `pub struct CommunityConfig { asserted_weight: f64, mention_weight: f64, structure_weight: f64, max_levels: i32 /* 4 */, min_size_to_split: usize, seed: u64 }` with `Default` = all weights `0.0`.
+  - `pub struct CommunityConfig { asserted_weight: f64, mention_weight: f64, structure_weight: f64, class_weight: f64 /* isa/genls/lifted, default 0 */, max_levels: i32 /* 4 */, min_size_to_split: usize, seed: u64 }` with `Default` = all weights `0.0`.
   - `pub struct ExtractionConfig { pub model: String, pub profile: String, pub prompt_version: String, pub schema_version: String, pub glean_max_rounds: u32 }`, which feeds `extract_fp` together with the chunk's store, id and text.
   - `SummaryInput` is used in Task 14; this task declares it as a forward struct in `fingerprints.rs` with the fields `members: Vec<(String, String, String)>, edges: Vec<(String, String, String, f64, String)>, child_fps: Vec<String>, groups: Vec<String>`. Task 14 uses this one.
 - Edge and isolate lists are sorted inside `graph_fp`, so caller order doesn't matter. Weights are encoded with `f64::to_bits().to_be_bytes()`.
@@ -282,7 +289,7 @@ Core tests go in `graphrag-core/tests/<module>.rs`, one file per new module, ope
 **Interfaces:**
 - Produces:
   - `pub enum SubjectKind { Document, Chunk, Graph, Community }`
-  - `pub enum Step { Chunk, Embed, Extract, Communities, Summary }`
+  - `pub enum Step { Chunk, Embed, Extract, Generalize, Communities, Summary }`. `Graph/Generalize` precedes `Graph/Communities` and runs only when no chunk-level work is ready.
   - `pub enum StepState { Current, Failed, Blocked }`
   - `pub fn Database::record_step(&self, kind: SubjectKind, id: i64, step: Step, fp: &str, state: StepState, error: Option<&str>) -> Result<(), GraphRagError>`
   - `pub fn Database::record_transient_failure(&self, kind, id, step, error: &str, next_try_at: &str) -> Result<u32 /* attempts */, GraphRagError>`
@@ -293,7 +300,7 @@ Core tests go in `graphrag-core/tests/<module>.rs`, one file per new module, ope
     - chunk-level items (embed, extract) where the stored fp differs from the expected fp, or there's no row, ordered by `priority DESC`, then `chunks.id ASC`;
     - skips `next_try_at > now` and `Failed` with an unchanged fp;
     - returns `Graph/Communities` only when no chunk-level item is ready.
-  - `pub struct StatusReport { per_group: BTreeMap<String, StepCounts>, total: StepCounts, backlog_by_priority: [usize; 3], failed_samples: Vec<(i64, Step, String)>, unmapped_relations: usize, rejected_entities: usize, type_conflicts: usize, pending_summaries: usize }`, with `pub struct StepCounts { current, stale, missing, failed: BTreeMap<Step, usize> }`.
+  - `pub struct StatusReport { per_group: BTreeMap<String, StepCounts>, total: StepCounts, backlog_by_priority: [usize; 3], failed_samples: Vec<(i64, Step, String)>, unmapped_relations: usize, rejected_entities: usize, type_conflicts: usize, pending_summaries: usize, classes: usize, new_classes_24h: usize, lifted_admitted: usize, dormant_entities: usize, dormant_relations: usize }`, with `pub struct StepCounts { current, stale, missing, failed: BTreeMap<Step, usize> }`.
   - `pub fn Database::status_report(&self, cfg: &dyn ExpectedFingerprints) -> Result<StatusReport, GraphRagError>`.
   - `pub fn StatusReport::is_complete(&self) -> bool` (zero missing and zero stale).
 
@@ -358,7 +365,7 @@ Core tests go in `graphrag-core/tests/<module>.rs`, one file per new module, ope
 **Interfaces:**
 - Consumes: `extract_fp` (Task 2), `normalize_*` (Task 8), `record_step` (Task 7).
 - Produces:
-  - `pub struct ExtractedEntity { pub name: String, pub entity_type: String, pub description: String }`
+  - `pub struct ExtractedEntity { pub name: String, pub entity_type: String, pub description: String, pub kind: Option<String>, pub is_class: bool, pub broader: Option<String> }`
   - `pub struct ExtractedRelation { pub source: String, pub target: String, pub relation: String, pub description: String, pub strength: Option<u8> }`
   - `pub enum AttemptOutcome { Ok { entities: Vec<ExtractedEntity>, relations: Vec<ExtractedRelation> }, Empty }`
   - `pub struct AttemptRecord<'a> { pub chunk_id: i64, pub attempt_fp: &'a str, pub model: &'a str, pub profile: &'a str, pub prompt_version: &'a str, pub schema_version: &'a str, pub raw_response: &'a str, pub outcome: AttemptOutcome, pub rejected_entities: usize }`
@@ -368,6 +375,8 @@ Core tests go in `graphrag-core/tests/<module>.rs`, one file per new module, ope
     - deletes this chunk's previous current attempt with its `attempt_*` rows (supersession, no retention);
     - upserts entities and relations through normalization, and creates missing relation endpoints as `other` (Review Focus 5);
     - writes the `attempt_*` instance rows and derived `mentions` links from the chunk's section (or document) to each entity;
+    - for each entity with a `kind`, resolves the class through `class_aliases` (Task 12A's `resolve_class`) and writes an extracted `isa` relation; for `broader`, a `genls` relation between the classes; if `is_class`, the entity itself is the class node (`entity_type='collection'`);
+    - logs one `uses` row (`kind='mention'`, `weight=1`, `source_id` = the evidence unit) per entity and relation whose evidence unit is new to it. A replay or re-extraction of unchanged text logs nothing;
     - GCs entities and relations with zero current support and no assertions;
     - records `step_status(chunk, extract) = Current(attempt_fp)`.
   - `pub struct CommitReport { pub replay: bool, pub superseded: Option<String>, pub entities: usize, pub relations: usize, pub unmapped_relations: usize, pub implicit_endpoints: usize, pub gc_entities: usize, pub gc_relations: usize }`
@@ -387,7 +396,11 @@ Core tests go in `graphrag-core/tests/<module>.rs`, one file per new module, ope
   - `empty_outcome_is_terminal` (status current, no rows);
   - `implicit_endpoint_created_as_other` (Review Focus 5);
   - `stale_attempt_fp_is_rejected` (the chunk content changed after the fp was computed → error, nothing written);
-  - `majority_type_wins` (two attempts say Software, one says Person → Software).
+  - `majority_type_wins` (two attempts say Software, one says Person → Software);
+  - `kind_becomes_isa_edge` (jj with kind `version control system` → `jj -[isa]-> version control system`);
+  - `broader_becomes_genls_edge`;
+  - `mention_logged_once_per_evidence_unit` (the same entity in two chunks of one section → 1 use; in a second section → 2);
+  - `replay_logs_no_use`.
 - [ ] **Step 2: Run** `cargo test --release -p graphrag-core --test attempts`. Expected: FAIL.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run.** Expected: PASS.
@@ -436,7 +449,8 @@ Core tests go in `graphrag-core/tests/<module>.rs`, one file per new module, ope
   - `pub const PROMPT_VERSION: &str = "paper-json-v1.1"`
   - `pub const SCHEMA_VERSION: &str = "graph-v1"`
   - `pub fn build_prompt(chunk: &str, heading_path: &[String]) -> ChatPrompt`, with `max_tokens` 12000.
-  - `pub fn response_schema() -> serde_json::Value`, the spike's schema (`scripts/extraction-spike/run.py` `PAPER_SCHEMA`).
+  - `pub fn response_schema() -> serde_json::Value`: the spike's schema (`scripts/extraction-spike/run.py` `PAPER_SCHEMA`), with entities gaining `kind` (string), `is_class` (boolean) and `broader` (string). `kind` and `is_class` are required; `broader` is optional.
+  - `build_prompt` takes `known_classes: &[String]` as well and lists them, asking the model to reuse a listed class when one fits.
   - `pub fn parse(raw: &str) -> Result<(AttemptOutcome, usize /* rejected fragments */), String>`. Malformed JSON gives `Err`. Valid JSON with both lists empty gives `Empty`.
   - `pub fn is_fragment(name: &str) -> bool`: more than 6 words, or terminal `.`/`!`/`?`, or longer than 60 chars, or empty, or numeric-only.
 - The prompt starts from the spike's `PAPER_SYSTEM` and adds the judges' fixes, verbatim intent from the spec's "Extraction profile":
@@ -450,6 +464,8 @@ Core tests go in `graphrag-core/tests/<module>.rs`, one file per new module, ope
   - `prompt_lists_canonical_vocabulary`;
   - `prompt_contains_software_and_example_rules`;
   - `prompt_distinguishes_isa_from_genls`;
+  - `prompt_lists_known_classes`;
+  - `parses_kind_and_broader`;
   - `parses_spike_arm_c_output` (fixture: copy one arm-C JSON from a spike run into `graphrag-llm/tests/fixtures/arm_c_1212.json`);
   - `empty_lists_are_empty_outcome`;
   - `broken_json_is_err`;
@@ -474,6 +490,7 @@ Core tests go in `graphrag-core/tests/<module>.rs`, one file per new module, ope
     - The weight between two nodes is the sum of the support of the extracted relations between them, plus `asserted_weight` × the active non-structural assertions, plus `mention_weight` × the derived mentions, plus `structure_weight` × the structural `has_part` assertions. Edges are undirected for Leiden.
     - Node set: `kind='entity'` always. Document, section and group nodes are included only if the relevant weight is > 0.
     - Every node id is passed through `resolve_entity` first, so `same_as` merges contract to one node.
+    - `isa`, `genls` and admitted lifted edges contribute `class_weight` × support (default 0). Dormant entities and relations are skipped (Task 12B).
     - Retracted assertions are excluded.
 
 - [ ] **Step 1: Write the failing tests:**
@@ -488,6 +505,69 @@ Core tests go in `graphrag-core/tests/<module>.rs`, one file per new module, ope
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run.** Expected: PASS.
 - [ ] **Step 5: Commit** `feat(core): evidence-weighted Leiden projection`.
+
+### Task 12A: Generalization: classes, relation hierarchy, lifted edges
+
+**Files:**
+- Create: `graphrag-core/src/generalize.rs`
+- Modify: `graphrag-core/src/synonyms.rs` (seed `relation_genls`); the normalization from Task 8 (base forms)
+- Test: `graphrag-core/tests/generalize.rs`
+
+**Interfaces:**
+- Consumes: Tasks 5, 8, 9, 12.
+- Produces:
+  - `pub fn base_form(name: &str) -> String`, which singularizes the head noun (`llms` → `llm`, `knowledge graphs` → `knowledge graph`, `queries` → `query`). Rule-based: `-ies→-y`, `-sses→-ss`, `-s→''` with an exception list (`kubernetes`, `nixos`, `redis`, `analysis`, `status`). It's applied in `normalize_entity_name` (Task 8) for the match key only; the display name is kept.
+  - `pub fn Database::resolve_class(&self, store: &str, kind: &str, embed: &dyn Fn(&str) -> Vec<f32>) -> Result<i64, GraphRagError>`: normalize, then `class_aliases` lookup, then nearest existing class by cosine (≥ 0.92, *builder's call*, tuned in the re-spike) recorded as an alias, else create a class node (`entity_type='collection'`).
+  - `pub fn Database::known_classes(&self, store: &str, document_id: Option<i64>, n: usize) -> Result<Vec<String>, GraphRagError>`, which feeds the prompt (Task 11).
+  - `pub fn Database::relation_broader(&self, relation: &str) -> Option<String>` and `set_relation_broader(relation, broader, origin)`. They're seeded with `exchanges_data_with ← {pushes_to, pulls_from, syncs_with}` and `compared_with ← {chosen_over, preferred_over}`, and the generalize step asks the LLM for unmapped relations.
+  - `pub struct LiftConfig { min_pairs: usize /* 3 */, g2_min: f64 /* 10.83 */, ic_floor: f64 }`
+  - `pub fn Database::information_content(&self, class_id: i64) -> Result<f64, GraphRagError>`: `-ln(instances_under(c) / total_instances)`, with instances counted through `isa` plus a `genls` closure computed by a recursive query.
+  - `pub fn Database::lift(&self, store: &str, cfg: &LiftConfig) -> Result<LiftReport, GraphRagError>`. It recomputes candidate class edges for changed instance relations only: for each (r', C1, C2), it counts distinct instance pairs and computes G² from the 2×2 table (pairs with r' between C1×C2 vs the relation's total and the class sizes). It sets `admitted` when `pairs ≥ min_pairs`, `g2 ≥ g2_min` and observed > expected, writes `lifted_from`, and skips any class whose IC < `ic_floor`. `pub struct LiftReport { candidates, admitted, newly_admitted, retired }`.
+  - `step_status(graph, 0, generalize)` is recorded with a fingerprint over (instance relation set, `relation_genls` table, `class_aliases`, `LiftConfig`).
+
+- [ ] **Step 1: Write the failing tests:**
+  - `base_form_singularizes_head_noun_with_exceptions`;
+  - `similar_kind_maps_to_existing_class` (`rust crate` ≈ `crate` with a fake embedder);
+  - `new_kind_creates_live_class`;
+  - `repeated_instance_relation_lifts_and_is_admitted` (jj→GitHub, git→Forgejo, hg→Bitbucket `pushes_to` gives `version control system -[exchanges_data_with]-> code hosting service` admitted, with pairs = 3);
+  - `generic_everything_edge_not_admitted` (a synthetic graph where `software -[uses]-> software` holds for most pairs: observed ≈ expected, so not admitted);
+  - `support_is_distinct_pairs` (the same pair stated 5 times gives pairs = 1);
+  - `ic_floor_stops_lifting_at_root`;
+  - `lift_is_incremental` (changing one relation recomputes only the affected candidates; the others' `updated_at` is unchanged);
+  - `no_closure_rows_stored`.
+- [ ] **Step 2: Run** `cargo test --release -p graphrag-core --test generalize`. Expected: FAIL.
+- [ ] **Step 3: Implement.**
+- [ ] **Step 4: Run.** Expected: PASS.
+- [ ] **Step 5: Commit** `feat(core): generalization pass with class canonicalization and G²-admitted lifted edges`.
+
+### Task 12B: Use log, salience and dormancy
+
+**Files:**
+- Create: `graphrag-core/src/salience.rs`
+- Test: `graphrag-core/tests/salience.rs`
+
+**Interfaces:**
+- Consumes: Task 1 (`uses`, `salience`, `edge_status`), Task 9 (mention logging).
+- Produces:
+  - `pub enum UseKind { Mention, Recall, Assert }`, with weights 1.0, 0.3 and 1.0.
+  - `pub fn Database::log_use(&self, item_kind: &str, item_id: i64, kind: UseKind, source_id: Option<i64>, at: &str) -> Result<(), GraphRagError>`
+  - `pub fn activation(uses: &[(f64 /* age_days */, f64 /* weight */)], d: f64) -> f64`, which returns `ln Σ w·max(age, 1/24)^-d` and `f64::NEG_INFINITY` when there are no uses.
+  - `pub struct SalienceConfig { d: f64 /* 0.5 */, tau: f64 /* -2.0 */ }`
+  - `pub fn Database::refresh_salience(&self, store: &str, cfg: &SalienceConfig, now: &str) -> Result<SalienceReport, GraphRagError>`: recompute for items with new uses or crossing τ, set `edge_status` to `dormant`/`active`, never delete. `pub struct SalienceReport { refreshed, went_dormant, revived }`.
+  - Dormant entities and relations are excluded by `project_graph` (Task 12), by recall's expansion lane (Task 16) and by `plan_summaries` (Task 14). Lifted-edge counts (Task 12A) still include dormant instances.
+
+- [ ] **Step 1: Write the failing tests:**
+  - `activation_matches_worked_examples` (one use 365 days ago → −2.95 ± 0.01; ten uses at ages 3, 6, …, 30 → 1.06 ± 0.02);
+  - `recall_weighs_less_than_mention`;
+  - `below_tau_goes_dormant_not_deleted`;
+  - `new_use_revives`;
+  - `dormant_excluded_from_projection`;
+  - `dormant_instances_still_count_in_lifted_pairs`;
+  - `documents_and_chunks_never_dormant`.
+- [ ] **Step 2: Run** `cargo test --release -p graphrag-core --test salience`. Expected: FAIL.
+- [ ] **Step 3: Implement.**
+- [ ] **Step 4: Run.** Expected: PASS.
+- [ ] **Step 5: Commit** `feat(core): ACT-R salience over a use log with dormancy`.
 
 ## Phase C — Communities and summaries
 
@@ -572,7 +652,7 @@ Core tests go in `graphrag-core/tests/<module>.rs`, one file per new module, ope
     2. Model pin: `served_models()` must contain `cfg.model`, or return `Unavailable`.
     3. Re-extract guard: if `status_report` shows more than 10% of chunks stale on extract, the run requires `accept_reextract`, or returns `Usage` with the count printed.
     4. Loop `next_work`. Up to `concurrency` LLM calls run in scoped threads; all DB writes go on the calling thread.
-    5. Dispatch per step: embed → `set_chunk_embedding` + record; extract → prompt → parse → `commit_attempt` (malformed → retry up to 3, then `Failed`); communities → `build_community_run`; summary → `plan_summaries`/`apply_summary`.
+    5. Dispatch per step: embed → `set_chunk_embedding` + record; extract → `known_classes` → prompt → parse → `commit_attempt` (malformed → retry up to 3, then `Failed`); generalize → LLM-propose broader relations for unmapped ones, then `lift`, then `refresh_salience`; communities → `build_community_run`; summary → `plan_summaries`/`apply_summary`.
     6. Transport errors → `record_transient_failure` with backoff `min(2^attempts, 3600)` s. `outage_threshold` consecutive failures return `Outage`.
     7. When nothing is ready, return `Done`.
   - `pub fn pause_flag(data_dir: &Path) -> PathBuf` (`worker.pause`). While it exists, `run` returns `Done` immediately.
@@ -606,7 +686,7 @@ Core tests go in `graphrag-core/tests/<module>.rs`, one file per new module, ope
 - Consumes: `add_document` (Task 6), `escalate_chunks`/`status_report` (Task 7), `graphrag_worker::{run, spawn_detached}` (Task 15).
 - Produces these CLI changes:
   - `graphrag note <text> [--group G]... [--source S] [--doc-key K]`: `add_document` with `groups` defaulting to `["conversations"]`, embed inline, `spawn_detached`.
-  - `graphrag ask <q> [--in G]... [--top N]`: scopes to `members_of_group`. After printing results it calls `escalate_chunks(hit_ids)` and, if any were escalated, `spawn_detached`. Each hit prints its groups and heading path.
+  - `graphrag ask <q> [--in G]... [--top N]`: scopes to `members_of_group`. After printing results it calls `escalate_chunks(hit_ids)` and, if any were escalated, `spawn_detached`. It logs a `Recall` use for each entity reached through the expansion lane, and that lane skips dormant entities. Each hit prints its groups and heading path.
   - Graph expansion lane in `ask`: for the fused top-N hits, collect their chunks' entities through `mentions`. Then add up to N/2 chunks from any group that mention those entities, ranked by the summed support of the shared entities, and fuse them as a third RRF list. This is how a note reaches the paper.
   - `graphrag work [--in G] [--once] [--max-items N] [--retry-failed] [--accept-reextract] [--pause|--resume]`: maps to `WorkerConfig` and exits with `ExitStatus as i32`.
   - `graphrag status [--json]`: prints `StatusReport` (per group: current/stale/missing/failed per step, backlog by priority, worker running, last LLM success or failure, pending summaries).
@@ -731,6 +811,7 @@ This task is operational: no new product code. **Live steps need Norman's explic
   - no `jj` or `Opus` typed Person;
   - no citation or example-handle entities;
   - `isa`/`genls` used correctly in the sampled outputs;
+  - class quality: count distinct classes per 100 entities with the known-class list on vs off; record it;
   - pick the chunk size: if `V11_small` beats `V11_prod` on both judges by more than 1 point, switch `ChunkerProfile::default_markdown()` to 1,000/100 before the rehearsal (and note the doubled call count).
 
   If the gate fails, fix the prompt, bump `PROMPT_VERSION`, and repeat. Record the scores in the rollout log.
@@ -740,7 +821,10 @@ This task is operational: no new product code. **Live steps need Norman's explic
   - `--apply`, then `graphrag work --accept-reextract` until exit 0;
   - `graphrag status` shows complete;
   - record wall time, attempt count, failed count, community count, singleton share, and cross-group communities;
-  - homonym probe: for about 20 hand-picked generic names (worker, status, store, database, index, queue, …), list each resolved entity's groups and top relations, and count wrong cross-project merges.
+  - homonym probe: for about 20 hand-picked generic names (worker, status, store, database, index, queue, …), list each resolved entity's groups and top relations, and count wrong cross-project merges;
+  - growth check: migrate half the documents (by blake2b order), run to complete, and count active edges; repeat for all. The active-edge ratio should be roughly ≤ 2.2× (near-linear);
+  - calibrate: τ (the share of entities dormant at 90 days), `ic_floor` (inspect the classes just above and below it), the class-alias cosine threshold (count wrong alias merges in a 30-class sample), and G² admission (review 20 admitted and 20 rejected lifted edges);
+  - record all of it in the rollout log.
 - [ ] **Step 3: Show Norman the rehearsal numbers. GATE: wait for approval before touching live.**
 - [ ] **Step 4: Live:**
   - fresh backup to `backups/<date>-pre-v2/`;

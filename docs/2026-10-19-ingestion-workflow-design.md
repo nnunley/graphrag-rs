@@ -1,7 +1,7 @@
 # One memory graph: fingerprinted, incremental, self-driving ingestion
 
 **Date:** 2026-10-19
-**Status:** Draft for review (revision 4: one store, groups and sections as graph nodes; research decisions from 2026-10-19 applied)
+**Status:** Draft for review (revision 5: one store, groups and sections as graph nodes; research decisions applied; generalization, salience and erosion added)
 **Supersedes:** the orchestration parts of `docs/2026-06-20-enrichment-engine-design.md` (SP1). Builds on `docs/2026-08-11-paper-workflow-roadmap.md` (M2/M3 principles) and `docs/paper-contract-v1.md` (fingerprint encoding).
 
 ## Why
@@ -134,6 +134,7 @@ document added (note / file / add_document)          → content-addressed; asse
        └─ embed   per chunk       fp = sha(chunk text, embedder id, dim)
        └─ extract per chunk       fp = ExtractionAttemptIdentityV1(store, chunk id, chunk text, model, profile, prompt ver, schema ver, glean rounds)
             └─ graph               extracted edges (support) + asserted edges + derived mentions
+                 └─ generalize    whole graph     classes merged, genls/genlPreds, lifted class edges (G² admitted), salience and dormancy
                  └─ communities   whole graph     fp = sha(weighted edge list incl. isolates, community config, seed)
                       └─ summary  per community   fp = sha(members + descriptions, edges + weights + descriptions, child summary fps, model, prompt ver)
 ```
@@ -308,7 +309,7 @@ Norman wants to know whether group and document edges should shape clusters. Sin
 
 **Decision:** paper-shaped JSON with thinking on (`paper-json-v1`, based on arm C of the spike below).
 
-- Entities: `name`, `type`, `description`. Relationships: `source`, `target`, `relation`, `description`, `strength 1-10`.
+- Entities: `name`, `type`, `description`, `kind` (the class it is an instance of, as a short singular common-noun phrase, chosen from the class list shown in the prompt when one fits), `is_class` (the term itself names a category), `broader` (the next more general class of `kind`). Relationships: `source`, `target`, `relation`, `description`, `strength 1-10`.
 - Enforced with llama.cpp `json_schema`.
 - `enable_thinking: true`.
 - Single block, no sandwich.
@@ -434,6 +435,67 @@ All without a live LLM unless noted. Release builds.
 - **LLM client:** `OpenAiChatClient` against a mock HTTP server, including the json_schema and thinking flags.
 - **Live rehearsal** on a DB copy against llama.cpp before touching live.
 - Paper M2/M3 gated capabilities stay gated unless their binding tests are actually met; this design delivers parts of both.
+
+## Generalization, salience and erosion (revision 5, 2026-10-20)
+
+Norman's direction (2026-10-19/20):
+- a normalization pass in which named entities **and relations** work their way up to higher-level concepts;
+- new classes and generalizations go live automatically;
+- specific terms slowly erode when unused, leaving the more generic ones;
+- the graph must not become over-connected generically, since link maintenance can be quadratic or worse.
+
+Research basis: the wiki's `concepts/memory-decay-and-consolidation`, `concepts/graph-backbone-and-summarization` and `ideas/memory-graph-construction-research`. A class-level spike on 2026-10-19 showed:
+- qwen3.8-27b names sensible classes (jj → version control system → software tool; llm-proxy → proxy service);
+- but it produced 152 distinct classes for 200 entities, so classes must be canonicalized;
+- upper ontologies (OpenCyc, WordNet) anchor only the upper classes. The middle of the hierarchy comes from the corpus.
+
+### Classes and generalization hierarchies
+
+- **Every extracted entity gets an `isa` edge** to the class node named by its `kind`, unless `is_class` is set, in which case the entity *is* a class node. `broader` gives a `genls` edge between classes. These are extracted edges, with support counted like any other.
+- **Classes are canonicalized as they arrive.**
+  - The extraction prompt shows the current class list (the top N classes by member count, plus the classes of entities already in the chunk's document).
+  - A new `kind` within a small embedding distance of an existing class, or matching it after normalization, maps to that class.
+  - Otherwise it becomes a new class immediately (live, per Norman). `status` reports new classes per day.
+  - *Builder's call:* the distance threshold, tuned in the re-spike.
+- **Relations get a generalization hierarchy** (Cyc's genlPreds): a table `relation_genls(relation, broader)` seeded from the canonical vocabulary (`pushes_to` → `exchanges_data_with`, `chosen_over` → `compared_with`, `utilizes` → `uses`).
+  - Unmapped raw relations get a proposed broader relation from the LLM in the generalize step, live immediately.
+  - The table is data, not code, so it grows from evidence.
+- **Names are reduced to base forms** before matching (`llms` → `llm`, `knowledge graphs` → `knowledge graph`, on the head noun).
+
+### Lifted class-level edges
+
+- For each instance relation `a -[r]-> b`, the generalize step adds evidence to a candidate class edge `class(a) -[r']-> class(b)` for `r'` = r and each of r's generalizations, at each class level up to the erosion floor (below).
+- **Support of a lifted edge** = the number of distinct instance pairs under it (AMIE's distinct-pair support), never summed instance support.
+- **Admission test (beats chance):** build a 2×2 table of distinct pairs for (r', C1, C2) against the relation's totals. Admit if:
+  - G² ≥ 10.83 (p < 0.001);
+  - observed > expected;
+  - at least 3 distinct pairs.
+
+  Admitted lifted edges are **derived** edges, with `derived_from` links to the instance relations that support them. Non-admitted candidates keep their counts but aren't edges. This is what stops `software -[uses]-> software`. The thresholds are starting values, measured in the rehearsal.
+- Lifted edges and `isa`/`genls` edges are **excluded from default clustering**. They get a `class_weight` in `CommunityConfig`, default 0, and join the clustering experiment.
+- Never materialized: class co-membership, and transitive `genls`/`part_of`/`relation_genls` closures. Those are computed at query time.
+
+### Salience and erosion
+
+- **Use log (schema now):** `uses(item_kind, item_id, at, kind, source_id, weight)`. `item_kind` is entity, relation or class.
+  - A **mention** is a new distinct evidence unit (section, or document) that states the item, weight 1.
+  - A **recall** is the item appearing in a recall result, weight 0.3 (*Claude's call*; this avoids self-reinforcement; untested).
+  - An **assertion** counts as one mention.
+  - Re-extracting an unchanged source is **not** a use.
+- **Salience** = ACT-R base-level activation: `B = ln Σ wⱼ · aⱼ^−0.5`, with `aⱼ` the age of use *j* in days. Computed on read, and cached by the worker in a salience column. Example values: one use a year ago gives about −2.95; ten uses this month give about +0.95.
+- **Dormancy:** an entity or extracted relation with `B < τ` becomes *dormant*.
+  - Dormant items drop out of recall's graph expansion, clustering and summaries.
+  - They are **never deleted**, and the next use revives them.
+  - Their evidence stays counted in the lifted class edges above them, which is how specifics erode while the gist remains.
+  - τ starts at −2.0 and is calibrated in the rehearsal (*Claude's call*).
+  - Source documents and chunks never go dormant; vector and keyword recall always see them.
+- **Erosion floor (basic level, not top).** Specifics erode toward the nearest `genls` ancestor whose information content `IC(c) = −log p(c)` (p = the share of entity instances under c) is above a corpus-calibrated floor and that has at least 3 members. The top classes (`software`, `thing`) have IC near 0 and are never the erosion target. Lifting stops at that floor too, so there are no edges between near-root classes.
+- **Folding (reserved, later):** an `edge_status` of `active | dormant | implied` is reserved now. A later batch pass may fold a dormant specific node into its class when the Navlakha MDL merge score is positive and the neighborhood error is at most ε. Folded edges are marked `implied`, never deleted.
+- **Backbone (later):** a per-edge disparity-filter α, computed at query time from support weights, can thin the active graph for recall expansion. It needs varied weights; uniform 1.0 keeps nothing.
+
+### Growth check
+
+The rehearsal measures active edges (non-dormant extracted, plus admitted lifted) after migrating half the corpus and after all of it. Growth should be near-linear in documents, not quadratic. It also hand-labels about 20 homonyms and about 20 fold/no-fold cases.
 
 ## Research decisions (revision 4, 2026-10-19)
 
