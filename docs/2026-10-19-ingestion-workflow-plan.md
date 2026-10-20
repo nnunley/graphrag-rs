@@ -811,6 +811,36 @@ Core tests go in `graphrag-core/tests/<module>.rs`, one file per new module, ope
 - [ ] **Step 4: Run** the suite, then the whole workspace: `cargo test --release --workspace`. Expected: PASS.
 - [ ] **Step 5: Commit** `feat(migrate): merge stores into one graph with groups and sections`.
 
+### Task 19A: Retrieval eval harness
+
+Norman, 2026-10-20: "We really need evals for different techniques here." Every retrieval choice in this plan (chunk size, section boundaries, the expansion lane, RRF weights) and every later one (other embedders, PixelRAG-style screenshot embeddings, rerankers) is compared on one fixed query set with one scorer, before and after migration.
+
+**Files:**
+- Create: `scripts/retrieval-eval/` (`make_queries.py`, `run.py`, `score.py`, `README.md`, `.gitignore` for `out/`), `docs/retrieval-eval-queries.jsonl` (the frozen query set, committed)
+- Modify: `graphrag-cli/src/main.rs` (`ask --json` prints `[{chunk_id, document_id, source, heading_path, score, lane}]`, and `--lanes vector,lexical,graph` selects lanes for ablation)
+- Test: `graphrag-cli/tests/cli_ask_json.rs`
+
+**Interfaces:**
+- Query record: `{id, query, kind /* known_item | paraphrase | cross_group | identifier */, relevant: [{source, anchor}], origin /* llm | episodic | human */}`. Relevance is anchored by `source` plus a quoted span of text, not by chunk id, so the set survives migration and re-chunking: a hit is relevant when its chunk text contains the anchor span.
+- Query kinds:
+  - `known_item`: qwen3.8 writes a question answered by one sampled chunk (blake2b sample across groups);
+  - `paraphrase`: the same, but the question must share no content word with the anchor span (tests the vector lane);
+  - `identifier`: a flag, path or error string copied from the text (tests the lexical lane);
+  - `cross_group`: a note and a paper passage about the same entity; the query uses the note's wording and both are relevant (tests the expansion lane);
+  - plus up to 30 real past questions mined from episodic memory, with relevance labeled by a blind judge (Claude subagent or Codex `-m gpt-6-sol`) over the pooled top-10 of all arms.
+- Metrics per arm and per kind: recall@5, recall@10, MRR@10, nDCG@10, p50/p95 latency. Arms run as `GRAPHRAG_DATA_DIR=<copy> graphrag ask --json --top 10 [--lanes …]`.
+- Size: about 150 queries; frozen once committed (a new version gets a new file, so scores stay comparable).
+
+- [ ] **Step 1: Write the failing test** `ask_json_reports_lanes_and_ids` (two notes; `ask --json --lanes lexical` returns only lexical-lane hits with `chunk_id`, `document_id`, `source`).
+- [ ] **Step 2: Run** `cargo test --release -p graphrag-cli --test cli_ask_json`. Expected: FAIL.
+- [ ] **Step 3: Implement** `--json` and `--lanes`.
+- [ ] **Step 4: Run.** Expected: PASS.
+- [ ] **Step 5: Generate the query set** from a `.backup` copy of the live DB (read-only), spot-check 20 queries by hand, commit the JSONL.
+- [ ] **Step 6: Baseline:** score the *current* live binary (`~/.cargo/bin/graphrag`, pre-v2) on a copy, per lane and fused. This is the number the migration has to beat. Record it in the rollout log.
+- [ ] **Step 7: Commit** `feat(eval): retrieval eval harness with frozen query set`.
+
+In Task 20, the rehearsal also scores the migrated copy (all lanes, each lane alone, and the expansion lane off), and the chunk-size choice in Step 1 is checked against retrieval scores, not only extraction scores.
+
 ### Task 20: Re-spike, rehearsal, live run, clustering experiment
 
 This task is operational: no new product code. **Live steps need Norman's explicit go-ahead at the marked gates.**
@@ -837,6 +867,7 @@ This task is operational: no new product code. **Live steps need Norman's explic
   - homonym probe: for about 20 hand-picked generic names (worker, status, store, database, index, queue, …), list each resolved entity's groups and top relations, and count wrong cross-project merges;
   - growth check: migrate half the documents (by blake2b order), run to complete, and count active edges; repeat for all. The active-edge ratio should be roughly ≤ 2.2× (near-linear);
   - calibrate: τ (the share of entities dormant at 90 days), `ic_floor` (inspect the classes just above and below it), the class-alias cosine threshold (count wrong alias merges in a 30-class sample), and G² admission (review 20 admitted and 20 rejected lifted edges);
+  - retrieval eval (Task 19A) on the migrated copy vs the pre-v2 baseline, per lane and per query kind;
   - record all of it in the rollout log.
 - [ ] **Step 3: Show Norman the rehearsal numbers. GATE: wait for approval before touching live.**
 - [ ] **Step 4: Live:**

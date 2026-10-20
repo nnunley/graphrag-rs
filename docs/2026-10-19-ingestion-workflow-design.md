@@ -41,7 +41,11 @@ This design makes two changes:
 
 ## Non-goals
 
-- Paper global search (roadmap M1/M5), citation-resolvable structured community reports (M4), and the evaluation harness (M6). Summaries here are good prose with recorded inputs, not M4 reports.
+- Paper global search (roadmap M1/M5), citation-resolvable structured community reports (M4), and the paper's global-search evaluation (M6). Summaries here are good prose with recorded inputs, not M4 reports.
+
+## Retrieval evals (added 2026-10-20)
+
+Norman: "We really need evals for different techniques here." A frozen query set (about 150 queries: known-item, paraphrase, identifier, cross-group, plus real past questions) with relevance anchored by source and quoted text, so it survives re-chunking and migration. Every retrieval technique is an arm scored on it: each lane alone, fused, expansion on/off, chunk sizes, and later other embedders, rerankers or PixelRAG-style screenshot embeddings. Metrics: recall@5/10, MRR@10, nDCG@10, latency. The pre-v2 system is scored first as the baseline the migration must beat.
 - Embedding-assisted entity resolution. Entities merge on normalized exact names.
 - Datalog/rules and the live browsing server. Asserted edges here are the first piece of the fact store, but general fact assertion through an API, plus audit and redaction, is the next project.
 - Provider selection or retry policy inside `graphrag-core`. Roadmap rule 1 stands: core owns plans, fingerprints and persistence; the worker owns model calls.
