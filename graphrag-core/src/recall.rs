@@ -12,10 +12,53 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use leit_fusion::fuse_default;
 
+/// Which recall lanes run (all by default); for ablation in evals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Lanes {
+    pub vector: bool,
+    pub lexical: bool,
+    pub graph: bool,
+}
+
+impl Default for Lanes {
+    fn default() -> Self {
+        Self {
+            vector: true,
+            lexical: true,
+            graph: true,
+        }
+    }
+}
+
+impl Lanes {
+    /// Parse `vector,lexical,graph` (any subset).
+    pub fn parse(s: &str) -> Result<Self, GraphRagError> {
+        let mut l = Self {
+            vector: false,
+            lexical: false,
+            graph: false,
+        };
+        for part in s.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+            match part {
+                "vector" => l.vector = true,
+                "lexical" => l.lexical = true,
+                "graph" => l.graph = true,
+                other => {
+                    return Err(GraphRagError::InvalidInput(format!(
+                        "unknown lane {other:?} (vector|lexical|graph)"
+                    )));
+                }
+            }
+        }
+        Ok(l)
+    }
+}
+
 /// One fused recall result.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecallHit {
     pub chunk_id: i64,
+    pub document_id: i64,
     pub rrf: f64,
     /// Cosine similarity, when the vector lane found it.
     pub vec: Option<f32>,
@@ -178,6 +221,31 @@ impl Database {
         lexical: Option<&LexicalIndex>,
         now: &str,
     ) -> Result<Vec<RecallHit>, GraphRagError> {
+        self.hybrid_recall_lanes(
+            store,
+            query,
+            embedding,
+            groups,
+            top,
+            lexical,
+            now,
+            Lanes::default(),
+        )
+    }
+
+    /// [`Database::hybrid_recall`] with a choice of lanes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn hybrid_recall_lanes(
+        &self,
+        store: &str,
+        query: &str,
+        embedding: &[f32],
+        groups: &[&str],
+        top: usize,
+        lexical: Option<&LexicalIndex>,
+        now: &str,
+        lanes: Lanes,
+    ) -> Result<Vec<RecallHit>, GraphRagError> {
         let mut allowed = self.active_chunk_ids(store)?;
         let scope = if groups.is_empty() {
             None
@@ -188,30 +256,38 @@ impl Database {
         };
         let candidate_k = top.max(5) * 4;
 
-        let source = BruteForceVectorSource::for_store(self, store)?;
-        let vector_hits: Vec<_> = source
-            .top_candidates(embedding, source.len().max(1))?
-            .into_iter()
-            .filter(|h| allowed.contains(&h.chunk_id))
-            .take(candidate_k)
-            .collect();
-
-        let lexical_hits: Vec<(i64, f32)> = match lexical {
-            Some(idx) => idx
-                .search(query, candidate_k * 8)?
+        let vector_hits: Vec<_> = if lanes.vector {
+            let source = BruteForceVectorSource::for_store(self, store)?;
+            source
+                .top_candidates(embedding, source.len().max(1))?
                 .into_iter()
-                .filter(|(id, _)| allowed.contains(id))
+                .filter(|h| allowed.contains(&h.chunk_id))
                 .take(candidate_k)
-                .collect(),
-            None => {
-                let chunks: Vec<_> = self
-                    .list_chunks(store)?
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        let lexical_hits: Vec<(i64, f32)> = if !lanes.lexical {
+            Vec::new()
+        } else {
+            match lexical {
+                Some(idx) => idx
+                    .search(query, candidate_k * 8)?
                     .into_iter()
-                    .filter(|c| allowed.contains(&c.id))
-                    .collect();
-                match LexicalIndex::build_from_chunks(&chunks)? {
-                    Some(idx) => idx.search(query, candidate_k)?,
-                    None => Vec::new(),
+                    .filter(|(id, _)| allowed.contains(id))
+                    .take(candidate_k)
+                    .collect(),
+                None => {
+                    let chunks: Vec<_> = self
+                        .list_chunks(store)?
+                        .into_iter()
+                        .filter(|c| allowed.contains(&c.id))
+                        .collect();
+                    match LexicalIndex::build_from_chunks(&chunks)? {
+                        Some(idx) => idx.search(query, candidate_k)?,
+                        None => Vec::new(),
+                    }
                 }
             }
         };
@@ -227,7 +303,11 @@ impl Database {
             .take(top.div_ceil(2))
             .filter_map(|f| f.id.parse().ok())
             .collect();
-        let expansion = self.expand_recall(store, &seeds, scope.as_ref(), top.div_ceil(2), now)?;
+        let expansion = if lanes.graph {
+            self.expand_recall(store, &seeds, scope.as_ref(), top.div_ceil(2), now)?
+        } else {
+            Expansion::default()
+        };
         let fused = fuse_default(&[
             ranked(vector_hits.iter().map(|h| h.chunk_id)),
             ranked(lexical_hits.iter().map(|(id, _)| *id)),
@@ -257,8 +337,10 @@ impl Database {
                 continue;
             };
             let (groups, heading_path) = labels.get(&id).cloned().unwrap_or_default();
+            let document_id = self.chunk_context(id)?.document_id;
             hits.push(RecallHit {
                 chunk_id: id,
+                document_id,
                 rrf: f.score,
                 vec: vec_score.get(&id).copied(),
                 lex: lex_score.get(&id).copied(),

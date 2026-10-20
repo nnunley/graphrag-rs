@@ -49,6 +49,12 @@ enum Commands {
         /// Restrict to these groups (and their subgroups)
         #[arg(long = "in")]
         groups: Vec<String>,
+        /// Emit JSON hits (chunk/document ids, per-lane scores) for tooling and evals
+        #[arg(long)]
+        json: bool,
+        /// Lanes to run: any of vector,lexical,graph (default: all)
+        #[arg(long)]
+        lanes: Option<String>,
         /// Deprecated alias for --in
         #[arg(long, hide = true)]
         store: Option<String>,
@@ -860,13 +866,24 @@ fn main() -> ExitCode {
             query,
             top,
             mut groups,
+            json,
+            lanes,
             store,
         } => {
             memory::store_alias(store, &mut groups);
-            open_embedder().and_then(|emb| {
-                let hits = memory::ask(&data_dir(), &query, &groups, top, &emb)?;
-                memory::print_hits(&hits);
-                Ok(())
+            let lanes = match lanes.as_deref().map(graphrag_core::recall::Lanes::parse) {
+                None => Ok(graphrag_core::recall::Lanes::default()),
+                Some(r) => r.map_err(|e| e.to_string()),
+            };
+            lanes.and_then(|lanes| {
+                let emb = open_embedder()?;
+                let hits = memory::ask(&data_dir(), &query, &groups, top, lanes, &emb)?;
+                if json {
+                    memory::print_hits_json(&hits)
+                } else {
+                    memory::print_hits(&hits);
+                    Ok(())
+                }
             })
         }
         Commands::Export { store } => cmd_export(&store),

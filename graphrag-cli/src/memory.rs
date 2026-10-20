@@ -162,6 +162,7 @@ pub fn ask(
     query: &str,
     groups: &[String],
     top: usize,
+    lanes: graphrag_core::recall::Lanes,
     emb: &dyn TextEmbedder,
 ) -> Result<Vec<Hit>, String> {
     let db = open(data_dir)?;
@@ -179,7 +180,16 @@ pub fn ask(
     let groups: Vec<&str> = groups.iter().map(String::as_str).collect();
     let now = db.now_utc().map_err(|e| e.to_string())?;
     let hits = db
-        .hybrid_recall(MEMORY_STORE, query, &embedding, &groups, top, None, &now)
+        .hybrid_recall_lanes(
+            MEMORY_STORE,
+            query,
+            &embedding,
+            &groups,
+            top,
+            None,
+            &now,
+            lanes,
+        )
         .map_err(|e| format!("recall: {e}"))?;
     let ids: Vec<i64> = hits.iter().map(|h| h.chunk_id).collect();
     // Retrieval sets priority: never waits on extraction.
@@ -187,6 +197,28 @@ pub fn ask(
         spawn_worker(data_dir);
     }
     Ok(hits)
+}
+
+/// One JSON array of hits, for tooling and the eval harness.
+pub fn print_hits_json(hits: &[Hit]) -> Result<(), String> {
+    let v: Vec<serde_json::Value> = hits
+        .iter()
+        .map(|h| {
+            serde_json::json!({
+                "chunk_id": h.chunk_id,
+                "document_id": h.document_id,
+                "source": h.source,
+                "groups": h.groups,
+                "heading_path": h.heading_path,
+                "rrf": h.rrf,
+                "lanes": {"vector": h.vec, "lexical": h.lex, "graph": h.graph},
+                "created_at": h.created_at,
+                "content": h.content,
+            })
+        })
+        .collect();
+    println!("{}", serde_json::to_string(&v).map_err(|e| e.to_string())?);
+    Ok(())
 }
 
 pub fn print_hits(hits: &[Hit]) {
