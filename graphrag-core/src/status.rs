@@ -491,27 +491,15 @@ impl Database {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// Input fingerprint for clustering: the current graph as an edge list.
-    /// Task 12's weighted projection replaces the unit weights used here.
+    /// Input fingerprint for clustering: the weighted projection (edges
+    /// incl. isolates) plus the community config.
     pub fn graph_input_fp(
         &self,
         store: &str,
         cfg: &CommunityConfig,
     ) -> Result<String, GraphRagError> {
-        let mut stmt = self.conn().prepare(
-            "SELECT head_id, tail_id FROM relations WHERE store = ?1 AND edge_status = 'active'",
-        )?;
-        let edges: Vec<(i64, i64, f64)> = stmt
-            .query_map(params![store], |r| Ok((r.get(0)?, r.get(1)?, 1.0)))?
-            .collect::<Result<_, _>>()?;
-        let mut stmt = self.conn().prepare(
-            "SELECT id FROM entities e WHERE store = ?1 AND kind = 'entity' AND edge_status = 'active'
-               AND NOT EXISTS (SELECT 1 FROM relations r WHERE r.head_id = e.id OR r.tail_id = e.id)",
-        )?;
-        let isolates: Vec<i64> = stmt
-            .query_map(params![store], |r| r.get(0))?
-            .collect::<Result<_, _>>()?;
-        Ok(graph_fp(&edges, &isolates, cfg, cfg.seed))
+        let p = self.project_graph(store, cfg)?;
+        Ok(graph_fp(&p.edges, &p.isolates, cfg, cfg.seed))
     }
 
     pub fn status_report(

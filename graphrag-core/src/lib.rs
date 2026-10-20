@@ -70,6 +70,7 @@ pub mod status;
 pub mod synonyms;
 pub mod token;
 pub mod vector_source;
+pub mod weights;
 
 #[cfg(feature = "embeddings")]
 pub mod embedder;
