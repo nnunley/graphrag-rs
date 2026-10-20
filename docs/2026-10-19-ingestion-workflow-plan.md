@@ -549,21 +549,28 @@ Core tests go in `graphrag-core/tests/<module>.rs`, one file per new module, ope
 **Interfaces:**
 - Consumes: Task 1 (`uses`, `salience`, `edge_status`), Task 9 (mention logging).
 - Produces:
-  - `pub enum UseKind { Mention, Recall, Assert }`, with weights 1.0, 0.3 and 1.0.
+  - `pub enum UseKind { Mention, Recall, Assert }`, all weight 1.0. `log_use` ignores a `Recall` for an item that already has a `Recall` use on the same UTC day.
   - `pub fn Database::log_use(&self, item_kind: &str, item_id: i64, kind: UseKind, source_id: Option<i64>, at: &str) -> Result<(), GraphRagError>`
   - `pub fn activation(uses: &[(f64 /* age_days */, f64 /* weight */)], d: f64) -> f64`, which returns `ln Σ w·max(age, 1/24)^-d` and `f64::NEG_INFINITY` when there are no uses.
-  - `pub struct SalienceConfig { d: f64 /* 0.5 */, tau: f64 /* -2.0 */ }`
-  - `pub fn Database::refresh_salience(&self, store: &str, cfg: &SalienceConfig, now: &str) -> Result<SalienceReport, GraphRagError>`: recompute for items with new uses or crossing τ, set `edge_status` to `dormant`/`active`, never delete. `pub struct SalienceReport { refreshed, went_dormant, revived }`.
+  - `pub struct SalienceConfig { d: f64 /* 0.5 */, tau: f64 /* -3.0 */ }`
+  - `pub fn Database::refresh_salience(&self, store: &str, cfg: &SalienceConfig, now: &str) -> Result<SalienceReport, GraphRagError>`: recompute for items with new uses or crossing τ. An item is set `dormant` only if `B < τ` **and** `gist_covered(item)` holds, and `active` otherwise. It never deletes and never touches documents, sections or chunks.
+  - `pub fn Database::gist_covered(&self, entity_id: i64) -> Result<bool, GraphRagError>`: true when every active relation of the entity has an admitted lifted edge (Task 12A) between its `isa` class and the other endpoint's class. False when the entity has no `isa` class. `pub struct SalienceReport { refreshed, went_dormant, revived }`.
+  - Rule for every task: no automated code path may delete, fold or mark dormant a document. Sections and chunks may only be replaced by `rechunk_document` (Task 6) when the chunker profile changes, and only as part of producing the document's new current set; a document is never left without chunks. Deleting documents happens only in explicit commands (the later audit/redaction project) and the one-time, counted migration cleanup (Task 19).
   - Dormant entities and relations are excluded by `project_graph` (Task 12), by recall's expansion lane (Task 16) and by `plan_summaries` (Task 14). Lifted-edge counts (Task 12A) still include dormant instances.
 
 - [ ] **Step 1: Write the failing tests:**
   - `activation_matches_worked_examples` (one use 365 days ago → −2.95 ± 0.01; ten uses at ages 3, 6, …, 30 → 1.06 ± 0.02);
-  - `recall_weighs_less_than_mention`;
+  - `recall_counts_once_per_day` (three recalls on one day → 1 use; on three days → 3 uses);
+  - `repeated_search_keeps_item_active` (a once-mentioned item recalled weekly stays above τ);
+  - `low_salience_unique_item_stays_active` (B < τ but not `gist_covered` → active);
+  - `low_salience_covered_item_goes_dormant`;
+  - `single_mention_active_for_a_year` (one mention 360 days ago → active; 420 days ago and covered → dormant);
   - `below_tau_goes_dormant_not_deleted`;
   - `new_use_revives`;
   - `dormant_excluded_from_projection`;
   - `dormant_instances_still_count_in_lifted_pairs`;
-  - `documents_and_chunks_never_dormant`.
+  - `documents_and_chunks_never_dormant`;
+  - `no_automated_path_removes_documents` (seed old notes with no uses, run every worker step in a full drain via the fake LLM, and assert the document count and every document's text are unchanged, and every document still has ≥ 1 current, embedded, lexically indexed chunk).
 - [ ] **Step 2: Run** `cargo test --release -p graphrag-core --test salience`. Expected: FAIL.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run.** Expected: PASS.

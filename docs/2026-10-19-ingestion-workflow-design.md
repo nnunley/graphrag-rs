@@ -479,18 +479,24 @@ Research basis: the wiki's `concepts/memory-decay-and-consolidation`, `concepts/
 
 - **Use log (schema now):** `uses(item_kind, item_id, at, kind, source_id, weight)`. `item_kind` is entity, relation or class.
   - A **mention** is a new distinct evidence unit (section, or document) that states the item, weight 1.
-  - A **recall** is the item appearing in a recall result, weight 0.3 (*Claude's call*; this avoids self-reinforcement; untested).
+  - A **recall** is the item appearing in a recall result, weight 1.0, counted at most once per item per day (Norman: things searched for repeatedly should have their salience boosted; the daily cap keeps one busy session from inflating a term).
   - An **assertion** counts as one mention.
   - Re-extracting an unchanged source is **not** a use.
 - **Salience** = ACT-R base-level activation: `B = ln Σ wⱼ · aⱼ^−0.5`, with `aⱼ` the age of use *j* in days. Computed on read, and cached by the worker in a salience column. Example values: one use a year ago gives about −2.95; ten uses this month give about +0.95.
-- **Dormancy:** an entity or extracted relation with `B < τ` becomes *dormant*.
+- **Dormancy:** an entity or extracted relation becomes *dormant* only when **both** hold:
+  1. `B < τ`;
+  2. its gist survives above it, meaning every one of its active relations is covered by an admitted lifted class edge (through its `isa` class).
+
+  A unique specific, such as a one-off gotcha whose details don't generalize, never goes dormant however old it is. Erosion only removes detail that's already summarized one level up.
   - Dormant items drop out of recall's graph expansion, clustering and summaries.
   - They are **never deleted**, and the next use revives them.
   - Their evidence stays counted in the lifted class edges above them, which is how specifics erode while the gist remains.
-  - τ starts at −2.0 and is calibrated in the rehearsal (*Claude's call*).
-  - Source documents and chunks never go dormant; vector and keyword recall always see them.
+  - τ starts at −3.0, so a thing mentioned once stays fully active for about a year (e^(−6) ≈ 1/403 days). It is calibrated in the rehearsal.
+- **Raw notes are never groomed (Norman, 2026-10-20).** A document's text, which is the raw note, is never made dormant, folded or deleted by any automated process: the worker, salience, generalization, folding or any future grooming pass. Its sections and chunks are views derived from that text. They're never made dormant or folded, and while the document exists it always has a current set of them, embedded and keyword-indexed, so vector and keyword recall always see it. The one automated change allowed is rebuilding those views when the chunker profile changes (re-chunking replaces chunks; the text is untouched).
+  - **Folding or deleting a document is explicit only:** a deliberate command by Norman or Claude, recorded as an assertion with the actor (`human:norman` / `agent:claude`), when, and why.
+  - The commands (`graphrag forget`, `graphrag fold`) belong to the later audit/redaction project. This design only guarantees that no automatic path exists.
 - **Erosion floor (basic level, not top).** Specifics erode toward the nearest `genls` ancestor whose information content `IC(c) = −log p(c)` (p = the share of entity instances under c) is above a corpus-calibrated floor and that has at least 3 members. The top classes (`software`, `thing`) have IC near 0 and are never the erosion target. Lifting stops at that floor too, so there are no edges between near-root classes.
-- **Folding (reserved, later):** an `edge_status` of `active | dormant | implied` is reserved now. A later batch pass may fold a dormant specific node into its class when the Navlakha MDL merge score is positive and the neighborhood error is at most ε. Folded edges are marked `implied`, never deleted.
+- **Folding (reserved, later):** an `edge_status` of `active | dormant | implied` is reserved now, for entities and relations only (never documents). A later batch pass may fold a dormant specific node into its class when the Navlakha MDL merge score is positive and the neighborhood error is at most ε. Folded edges are marked `implied`, never deleted.
 - **Backbone (later):** a per-edge disparity-filter α, computed at query time from support weights, can thin the active graph for recall expansion. It needs varied weights; uniform 1.0 keeps nothing.
 
 ### Growth check
