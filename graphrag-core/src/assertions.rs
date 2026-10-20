@@ -88,7 +88,17 @@ impl Database {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![head, relation, tail, by.0, reason, context],
         )?;
-        Ok(self.conn().last_insert_rowid())
+        let id = self.conn().last_insert_rowid();
+        // An assertion counts as a use of each extracted-entity endpoint.
+        if relation != "same_as" {
+            self.conn().execute(
+                "INSERT INTO uses (item_kind, item_id, at, kind, source_id, weight)
+                 SELECT 'entity', e.id, strftime('%Y-%m-%dT%H:%M:%fZ','now'), 'assert', ?3, 1.0
+                 FROM entities e WHERE e.id IN (?1, ?2) AND e.kind = 'entity'",
+                params![head, tail, id],
+            )?;
+        }
+        Ok(id)
     }
 
     /// Retract an assertion. The record stays, with who retracted it and when.

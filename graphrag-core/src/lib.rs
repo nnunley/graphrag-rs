@@ -64,6 +64,7 @@ pub mod mr;
 pub mod nodes;
 pub mod paper;
 pub mod query;
+pub mod salience;
 pub(crate) mod schema_v2;
 pub mod sections;
 pub mod status;
