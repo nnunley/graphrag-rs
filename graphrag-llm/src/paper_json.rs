@@ -1,4 +1,4 @@
-//! `paper-json-v1.1`: paper-shaped JSON extraction (entities with
+//! `paper-json-v1.2`: paper-shaped JSON extraction (entities with
 //! descriptions and classes; relationships with descriptions and strength),
 //! enforced with llama.cpp `json_schema`, thinking on. Chosen by the
 //! 2026-10-19 blind spike (arm C) with the judges' fixes applied.
@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 pub const PROFILE: &str = "paper-json";
-pub const PROMPT_VERSION: &str = "paper-json-v1.1";
+pub const PROMPT_VERSION: &str = "paper-json-v1.2";
 pub const SCHEMA_VERSION: &str = "graph-v1";
 /// Thinking uses part of the budget; arm C averaged ~1.2K output tokens.
 pub const MAX_TOKENS: u32 = 12000;
@@ -52,8 +52,8 @@ fn system_prompt(known_classes: &[String]) -> String {
    - strength: integer 1-10 for how strong and explicit the relationship is in the text
 
 Rules:
-- tools, version-control systems, libraries and AI models are Software, never Person.
-- ignore illustrative example names (e.g. alice, bob, foo) and bibliographic citations.
+- tools, version-control systems, libraries and AI models are Software, never Person. AI models (Claude, Opus, Sonnet, GPT, Codex, qwen) are Software even when they act (review, write, decide).
+- ignore illustrative example names (e.g. alice, bob, foo) and bibliographic citations; names that appear only inside code samples or examples (such as #alice) are not entities.
 - prefer a specific relation; use associated_with only when nothing else fits.
 - use isa when something is an instance of a kind, genls when one kind is a more specific kind of another.
 - Only use information stated in the text. If there are no entities, return empty lists.

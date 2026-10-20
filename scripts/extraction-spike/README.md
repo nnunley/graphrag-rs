@@ -17,3 +17,19 @@ It reads the graphrag DB read-only and writes everything under this directory's 
 4. `python3 -I score.py claude_judge.json codex_judge.json`: unblinds and prints scores by arm and store.
 
 Outputs (`out/`, `packets.txt`, `*_judge.json`, `blind_key.json`, `metrics.json`) are not committed.
+
+## Production-size re-spike (plan Task 20)
+
+Arms `C_prod` (arm C's prompt), `V11_prod` (`paper-json-v1.1`, the shipped prompt)
+and `V11_small` (v1.1 at 1,000/100). Each source chunk is cut by the production
+chunker and the pieces' extractions are merged per source chunk, so quality and
+timing are measured at production size. Prompt and chunker come from
+`target/release/examples/spike_tools` (`cargo build --release -p graphrag-worker --example spike_tools`).
+
+```sh
+export SPIKE_DB=<a .backup copy> SPIKE_OUT=out2 SPIKE_PACK=v11_ SPIKE_ARMS=C_prod,V11_prod,V11_small
+python3 -I run.py && python3 -I pack.py
+# judges read v11_packets.txt; then
+python3 -I score.py v11_claude_judge.json v11_codex_judge.json
+python3 -I classes.py   # distinct classes per 100 entities, Person-typed tools, example handles
+```

@@ -3,8 +3,9 @@ import json, os, re, sys
 from collections import defaultdict
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-key = json.load(open(os.path.join(HERE, "blind_key.json")))
-chunks = {str(c["chunk_id"]): c["store"] for c in json.load(open(os.path.join(HERE, "out", "chunks.json")))}
+PACK = os.environ.get("SPIKE_PACK", "")
+key = json.load(open(os.path.join(HERE, f"{PACK}blind_key.json")))
+chunks = {str(c["chunk_id"]): c["store"] for c in json.load(open(os.path.join(HERE, os.environ.get("SPIKE_OUT", "out"), "chunks.json")))}
 CRIT = ["ground", "recall", "entity", "useful"]
 
 

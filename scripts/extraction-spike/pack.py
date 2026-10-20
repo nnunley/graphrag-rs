@@ -2,14 +2,15 @@
 import hashlib, json, os, re, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-OUT = os.path.join(HERE, "out")
-ARMS = ["A_triples_nothink", "B_paperjson_nothink", "C_paperjson_think"]
+OUT = os.path.join(HERE, os.environ.get("SPIKE_OUT", "out"))
+ARMS = os.environ.get("SPIKE_ARMS", "A_triples_nothink,B_paperjson_nothink,C_paperjson_think").split(",")
+PACK = os.environ.get("SPIKE_PACK", "")
 LABELS = ["X", "Y", "Z"]
 
 
 def parse(arm, content):
     """-> (entities[name,type,desc], relations[src,rel,tgt,desc,strength], ok)"""
-    if arm.startswith("A"):
+    if arm.startswith("A_"):
         ents, rels, bad = {}, [], 0
         for line in content.splitlines():
             m = re.match(r"\s*(.+?)\s*\(([^)]*)\)\s*-\[(.+?)\]->\s*(.+?)\s*\(([^)]*)\)\s*$", line)
@@ -61,9 +62,9 @@ for c in chunks:
         parts.append(f"--- EXTRACTION {lab} ---\n{render(ents, rels) if ok else '(UNPARSEABLE OUTPUT)'}\n")
     packets.append("\n".join(parts))
 
-open(os.path.join(HERE, "packets.txt"), "w").write("\n\n".join(packets))
-json.dump(key, open(os.path.join(HERE, "blind_key.json"), "w"), indent=1)
-json.dump(metrics, open(os.path.join(HERE, "metrics.json"), "w"), indent=1)
+open(os.path.join(HERE, f"{PACK}packets.txt"), "w").write("\n\n".join(packets))
+json.dump(key, open(os.path.join(HERE, f"{PACK}blind_key.json"), "w"), indent=1)
+json.dump(metrics, open(os.path.join(HERE, f"{PACK}metrics.json"), "w"), indent=1)
 
 # summary per arm
 for arm in ARMS:

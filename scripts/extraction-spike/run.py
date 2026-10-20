@@ -1,12 +1,14 @@
 """Spike: compare extraction prompt arms on qwen3.8-27b (llama.cpp).
 Read-only on the graphrag DB. Writes results to ./out/."""
-import hashlib, json, os, sqlite3, sys, time, urllib.request
+import hashlib, json, os, sqlite3, subprocess, sys, time, urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-OUT = os.path.join(HERE, "out")
+OUT = os.path.join(HERE, os.environ.get("SPIKE_OUT", "out"))
 os.makedirs(OUT, exist_ok=True)
-DB = os.path.expanduser("~/Library/Application Support/graphrag/graphrag.db")
+DB = os.environ.get("SPIKE_DB") or os.path.expanduser("~/Library/Application Support/graphrag/graphrag.db")
+# Production chunker + production prompt, from graphrag-worker/examples/spike_tools.rs
+TOOLS = os.environ.get("SPIKE_TOOLS", os.path.join(HERE, "../../target/release/examples/spike_tools"))
 URL = "http://ndn.lan:8080/v1/chat/completions"
 MODEL = "qwen3.8-27b"
 STORES = ["operation", "conversations", "mica-docs", "graphrag-paper"]
@@ -55,6 +57,17 @@ PAPER_SCHEMA = {
     "required": ["entities", "relationships"],
 }
 
+# Production-size arms (re-spike, plan Task 20): each source chunk is cut by the
+# production chunker and the pieces' extractions are merged per source chunk.
+PROD_ARMS = {
+    "C_prod": dict(prompt="arm_c", size=2000, overlap=200),
+    # "shipped" = whatever graphrag-llm's paper_json builds now (spike_tools).
+    "V11_prod": dict(prompt="shipped", size=2000, overlap=200),
+    "V11_small": dict(prompt="shipped", size=1000, overlap=100),
+    "V12_prod": dict(prompt="shipped", size=2000, overlap=200),
+    "V12_small": dict(prompt="shipped", size=1000, overlap=100),
+}
+
 ARMS = {
     "A_triples_nothink": dict(system=TRIPLE_LINE_SYSTEM, schema=None, think=False, max_tokens=1000),
     "B_paperjson_nothink": dict(system=PAPER_SYSTEM, schema=PAPER_SCHEMA, think=False, max_tokens=4000),
@@ -94,12 +107,64 @@ def call(arm, chunk):
                 finish=d["choices"][0].get("finish_reason"))
 
 
+def tool(args, stdin):
+    return json.loads(subprocess.run([TOOLS] + args, input=stdin, capture_output=True, text=True, check=True).stdout)
+
+
+def pieces(content, size, overlap):
+    raw = content.encode()
+    return [(raw[s["start"]:s["end"]].decode(), s["heading_path"]) for s in tool(["plan", str(size), str(overlap)], content)]
+
+
+def post(body):
+    req = urllib.request.Request(URL, json.dumps(body).encode(), {"Content-Type": "application/json"})
+    t = time.time()
+    with urllib.request.urlopen(req, timeout=900) as r:
+        d = json.load(r)
+    m = d["choices"][0]["message"]
+    return time.time() - t, m.get("content") or "", d.get("usage") or {}, d["choices"][0].get("finish_reason")
+
+
+def call_prod(arm, chunk):
+    cfg = PROD_ARMS[arm]
+    ents, rels, wall, toks, finishes = {}, {}, 0.0, 0, []
+    for text, path in pieces(chunk, cfg["size"], cfg["overlap"]):
+        if cfg["prompt"] == "shipped":
+            p = tool(["prompt"], json.dumps({"chunk": text, "heading_path": path, "known_classes": []}))
+            body = {"model": MODEL, "temperature": 0, "max_tokens": p["max_tokens"],
+                    "messages": [{"role": "system", "content": p["system"]}, {"role": "user", "content": p["user"]}],
+                    "chat_template_kwargs": {"enable_thinking": p["thinking"]},
+                    "response_format": {"type": "json_schema", "json_schema": {"name": "graph", "schema": p["schema"]}}}
+        else:
+            a = ARMS["C_paperjson_think"]
+            body = {"model": MODEL, "temperature": 0, "max_tokens": a["max_tokens"],
+                    "messages": [{"role": "system", "content": a["system"]},
+                                 {"role": "user", "content": f"Extract entities and relationships from this text:\n\n{text}"}],
+                    "chat_template_kwargs": {"enable_thinking": True},
+                    "response_format": {"type": "json_schema", "json_schema": {"name": "graph", "schema": a["schema"]}}}
+        w, content, usage, finish = post(body)
+        wall += w
+        toks += usage.get("completion_tokens") or 0
+        finishes.append(finish)
+        try:
+            d = json.loads(content)
+        except Exception:
+            continue
+        for e in d.get("entities", []):
+            ents.setdefault(e.get("name", "").strip().lower(), e)
+        for r in d.get("relationships", []):
+            rels.setdefault((r.get("source", "").lower(), r.get("relation", ""), r.get("target", "").lower()), r)
+    merged = json.dumps({"entities": list(ents.values()), "relationships": list(rels.values())})
+    return dict(wall=round(wall, 1), content=merged, usage={"completion_tokens": toks},
+                finish="length" if "length" in finishes else "stop", pieces=len(finishes))
+
+
 def job(arm, cid, store, content):
     path = os.path.join(OUT, f"{cid}.{arm}.json")
     if os.path.exists(path):
         return
     try:
-        res = call(arm, content)
+        res = call_prod(arm, content) if arm in PROD_ARMS else call(arm, content)
     except Exception as e:
         res = dict(error=str(e))
     res.update(chunk_id=cid, store=store, arm=arm)
@@ -110,7 +175,8 @@ def job(arm, cid, store, content):
 if __name__ == "__main__":
     rows = sample()
     json.dump([dict(chunk_id=r[0], store=r[1], content=r[2]) for r in rows], open(os.path.join(OUT, "chunks.json"), "w"), indent=1)
+    arms = os.environ.get("SPIKE_ARMS", ",".join(ARMS)).split(",")
     with ThreadPoolExecutor(4) as ex:  # llama.cpp has 4 slots
-        for arm in ARMS:
+        for arm in arms:
             for cid, store, content in rows:
                 ex.submit(job, arm, cid, store, content)

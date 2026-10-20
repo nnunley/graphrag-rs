@@ -5,3 +5,7 @@ blind_key.json
 metrics.json
 codex_log.txt
 __pycache__/
+v12_*
+out2/
+out2*.log
+v11_*

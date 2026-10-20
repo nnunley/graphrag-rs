@@ -17,7 +17,7 @@ fn prompt_text(classes: &[String]) -> String {
 #[test]
 fn constants_are_pinned() {
     assert_eq!(PROFILE, "paper-json");
-    assert_eq!(PROMPT_VERSION, "paper-json-v1.1");
+    assert_eq!(PROMPT_VERSION, "paper-json-v1.2");
     assert_eq!(SCHEMA_VERSION, "graph-v1");
     assert_eq!(build_prompt("x", &[], &[]).max_tokens, 12000);
 }
@@ -46,6 +46,13 @@ fn prompt_contains_software_and_example_rules() {
     assert!(
         t.contains("prefer a specific relation; use associated_with only when nothing else fits")
     );
+    // v1.2: the re-spike still typed Opus as Person and took #alice from a code sample.
+    assert!(t.contains(
+        "AI models (Claude, Opus, Sonnet, GPT, Codex, qwen) are Software even when they act"
+    ));
+    assert!(t.contains(
+        "names that appear only inside code samples or examples (such as #alice) are not entities"
+    ));
 }
 
 #[test]
