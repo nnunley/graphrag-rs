@@ -31,7 +31,8 @@ pub struct EntityExtraction {
 pub use graphrag_core::prompt::ChatPrompt;
 
 /// Synchronous chat completion provider.
-pub trait ChatClient {
+/// `Send + Sync` so the worker can run several calls on scoped threads.
+pub trait ChatClient: Send + Sync {
     fn complete(&self, prompt: &ChatPrompt) -> Result<String, String>;
     /// Complete with an optional provider-native output-format constraint (e.g. Ollama `format`
     /// = a JSON schema). An `ExtractionStrategy` supplies it via `response_format()`. Default

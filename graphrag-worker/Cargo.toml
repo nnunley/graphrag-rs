@@ -1,0 +1,15 @@
+[package]
+name = "graphrag-worker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Self-driving ingestion worker: drains fingerprinted graphrag work against an LLM"
+
+[dependencies]
+graphrag-core = { path = "../graphrag-core", default-features = false, features = ["chunking"] }
+graphrag-llm = { path = "../graphrag-llm" }
+serde_json = "1.0"
+
+[dev-dependencies]
+tempfile = "3"
+rusqlite = { version = "0.32", features = ["bundled"] }

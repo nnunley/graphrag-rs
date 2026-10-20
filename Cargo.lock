@@ -1377,6 +1377,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "graphrag-worker"
+version = "0.1.0"
+dependencies = [
+ "graphrag-core",
+ "graphrag-llm",
+ "rusqlite",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "h2"
 version = "0.4.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"

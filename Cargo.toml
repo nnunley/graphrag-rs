@@ -7,6 +7,7 @@ members = [
     "graphrag-mcp",
     "graphrag-cli",
     "graphrag-py",
+    "graphrag-worker",
 ]
 
 # Optional bindings are excluded from default builds: the Python extension
@@ -19,6 +20,7 @@ default-members = [
     "graphrag-llm",
     "graphrag-mcp",
     "graphrag-cli",
+    "graphrag-worker",
 ]
 
 [workspace.package]

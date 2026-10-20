@@ -72,6 +72,7 @@ pub mod sections;
 pub mod status;
 pub mod summaries;
 pub mod synonyms;
+pub mod text_embedder;
 pub mod token;
 pub mod vector_source;
 pub mod weights;

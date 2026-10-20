@@ -241,3 +241,30 @@ fn compiled_origin_is_stored() {
         .unwrap();
     assert_eq!(f.db.document_origin(doc_id(&d)).unwrap(), Origin::Compiled);
 }
+
+#[test]
+fn rechunk_works_for_converted_documents() {
+    // add_chunk leaves a node-less document, the shape v1 conversion produces.
+    let f = fx();
+    let long: String = (0..900).map(|i| format!("w{i} ")).collect();
+    let chunk =
+        f.db.add_chunk("memory", &long, Some("brain"), None)
+            .unwrap();
+    let doc: i64 = f
+        .raw()
+        .query_row(
+            "SELECT document_id FROM chunks WHERE id = ?1",
+            [chunk],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let report = f.db.rechunk_document(doc, &f.profile).unwrap();
+    assert!(report.added >= 2, "{report:?}");
+    assert!(
+        f.db.document_node(doc).is_ok(),
+        "a node is created on demand"
+    );
+    for c in f.db.document_chunks(doc).unwrap() {
+        assert!(f.db.chunk_text(c).unwrap().chars().count() <= 2000);
+    }
+}

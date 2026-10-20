@@ -276,6 +276,67 @@ fn ready(row: Option<&Row>, expected: &str, now: &str) -> bool {
 const CHUNK_STEPS: [Step; 2] = [Step::Embed, Step::Extract];
 
 impl Database {
+    /// The database clock, ISO-8601 UTC with milliseconds.
+    pub fn now_utc(&self) -> Result<String, GraphRagError> {
+        Ok(self
+            .conn()
+            .query_row("SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now')", [], |r| {
+                r.get(0)
+            })?)
+    }
+
+    /// `now + secs` in the same format, for backoff.
+    pub fn utc_after_secs(&self, secs: u64) -> Result<String, GraphRagError> {
+        Ok(self.conn().query_row(
+            "SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now', ?1)",
+            params![format!("+{secs} seconds")],
+            |r| r.get(0),
+        )?)
+    }
+
+    pub fn set_worker_state(&self, key: &str, value: &str) -> Result<(), GraphRagError> {
+        self.conn().execute(
+            "INSERT INTO worker_state (key, value, updated_at) VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    pub fn worker_state(&self) -> Result<BTreeMap<String, String>, GraphRagError> {
+        let mut stmt = self
+            .conn()
+            .prepare("SELECT key, COALESCE(value, '') FROM worker_state")?;
+        Ok(stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<Result<_, _>>()?)
+    }
+
+    /// Make every failed step eligible again (`graphrag work --retry-failed`).
+    pub fn clear_failed_steps(&self) -> Result<usize, GraphRagError> {
+        Ok(self
+            .conn()
+            .execute("DELETE FROM step_status WHERE state = 'failed'", [])?)
+    }
+
+    /// Attempts recorded so far for a step (0 when none).
+    pub fn step_attempts(
+        &self,
+        kind: SubjectKind,
+        id: i64,
+        step: Step,
+    ) -> Result<u32, GraphRagError> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT attempts FROM step_status WHERE subject_kind = ?1 AND subject_id = ?2 AND step = ?3",
+                params![kind.as_str(), id, step.as_str()],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(0))
+    }
+
     pub fn record_step(
         &self,
         kind: SubjectKind,

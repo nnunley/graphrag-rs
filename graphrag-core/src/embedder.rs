@@ -500,6 +500,25 @@ fn mean_pool(embeddings: &[Vec<f32>]) -> Vec<f32> {
     result
 }
 
+#[cfg(feature = "embeddings")]
+impl crate::text_embedder::TextEmbedder for Embedder {
+    fn id(&self) -> String {
+        match self.config.model {
+            EmbedderModel::NomicEmbedText => "fastembed:nomic-embed-text-v1.5".into(),
+            EmbedderModel::MiniLM => "fastembed:all-minilm-l6-v2".into(),
+            m => format!("remote:{}", m.default_remote_model()),
+        }
+    }
+
+    fn dim(&self) -> usize {
+        self.dimension()
+    }
+
+    fn embed(&self, text: &str) -> Result<Vec<f32>, GraphRagError> {
+        Embedder::embed(self, text)
+    }
+}
+
 #[cfg(test)]
 #[cfg(feature = "embeddings")]
 mod tests {

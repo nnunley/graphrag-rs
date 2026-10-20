@@ -330,6 +330,20 @@ impl Database {
         Ok(out)
     }
 
+    /// Extracted relation names that map to no canonical relation and have
+    /// no broader relation yet: what the generalize step asks the LLM about.
+    pub fn unmapped_relation_names(&self, store: &str) -> Result<Vec<String>, GraphRagError> {
+        let mut stmt = self.conn().prepare(
+            "SELECT DISTINCT r.relation FROM relations r
+             WHERE r.store = ?1 AND r.canonical_relation IS NULL
+               AND NOT EXISTS (SELECT 1 FROM relation_genls g WHERE g.relation = r.relation)
+             ORDER BY r.relation",
+        )?;
+        Ok(stmt
+            .query_map(params![store], |r| r.get(0))?
+            .collect::<Result<_, _>>()?)
+    }
+
     pub fn relation_broader(&self, relation: &str) -> Result<Option<String>, GraphRagError> {
         Ok(self
             .conn()

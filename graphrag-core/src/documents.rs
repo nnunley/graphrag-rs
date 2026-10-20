@@ -64,6 +64,13 @@ pub struct RechunkReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChunkContext {
+    pub document_id: i64,
+    pub heading_path: Vec<String>,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SectionRow {
     pub id: i64,
     pub node_id: i64,
@@ -270,6 +277,23 @@ impl Database {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// What the extractor needs to know about a chunk besides its text.
+    pub fn chunk_context(&self, chunk_id: i64) -> Result<ChunkContext, GraphRagError> {
+        let (document_id, path, text): (i64, Option<String>, String) = self.conn().query_row(
+            "SELECT c.document_id, s.heading_path, c.content FROM chunk_view c
+             LEFT JOIN sections s ON s.id = c.section_id WHERE c.id = ?1",
+            params![chunk_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+        Ok(ChunkContext {
+            document_id,
+            heading_path: path
+                .map(|p| p.split(HEADING_PATH_SEP).map(String::from).collect())
+                .unwrap_or_default(),
+            text,
+        })
+    }
+
     pub fn chunk_section(&self, chunk_id: i64) -> Result<Option<i64>, GraphRagError> {
         Ok(self.conn().query_row(
             "SELECT section_id FROM chunks WHERE id = ?1",
@@ -439,13 +463,17 @@ impl Database {
         profile: &ChunkerProfile,
     ) -> Result<RechunkReport, GraphRagError> {
         let tx = self.conn().unchecked_transaction()?;
-        let (content, store, source): (String, String, Option<String>) = tx.query_row(
-            "SELECT d.content, n.store, d.source FROM documents d JOIN entities n ON n.id = d.node_id
-             WHERE d.id = ?1",
+        // v1-converted documents have no node yet: take the store from their
+        // chunks and create the node on demand.
+        let (content, fp, store, source): (String, String, String, Option<String>) = tx.query_row(
+            "SELECT d.content, d.content_fp,
+                    COALESCE(n.store, (SELECT c.store FROM chunks c WHERE c.document_id = d.id LIMIT 1)),
+                    d.source
+             FROM documents d LEFT JOIN entities n ON n.id = d.node_id WHERE d.id = ?1",
             params![document_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )?;
-        let doc_node = self.document_node(document_id)?;
+        let doc_node = self.ensure_document_node(document_id, &store, &fp)?;
         let (sections, planned) = plan_chunks(&content, profile);
         let section_ids = self.sync_sections(document_id, doc_node, &store, &content, &sections)?;
 
