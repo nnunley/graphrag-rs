@@ -500,14 +500,20 @@ fn mean_pool(embeddings: &[Vec<f32>]) -> Vec<f32> {
     result
 }
 
+/// The identity an embedder model contributes to the embed-step
+/// fingerprint. Computable without loading the model (for `status`).
+pub fn embedder_model_id(model: EmbedderModel) -> String {
+    match model {
+        EmbedderModel::NomicEmbedText => "fastembed:nomic-embed-text-v1.5".into(),
+        EmbedderModel::MiniLM => "fastembed:all-minilm-l6-v2".into(),
+        m => format!("remote:{}", m.default_remote_model()),
+    }
+}
+
 #[cfg(feature = "embeddings")]
 impl crate::text_embedder::TextEmbedder for Embedder {
     fn id(&self) -> String {
-        match self.config.model {
-            EmbedderModel::NomicEmbedText => "fastembed:nomic-embed-text-v1.5".into(),
-            EmbedderModel::MiniLM => "fastembed:all-minilm-l6-v2".into(),
-            m => format!("remote:{}", m.default_remote_model()),
-        }
+        embedder_model_id(self.config.model)
     }
 
     fn dim(&self) -> usize {

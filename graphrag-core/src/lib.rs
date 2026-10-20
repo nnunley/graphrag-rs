@@ -66,6 +66,8 @@ pub mod nodes;
 pub mod paper;
 pub mod prompt;
 pub mod query;
+#[cfg(feature = "chunking")]
+pub mod recall;
 pub mod salience;
 pub(crate) mod schema_v2;
 pub mod sections;
@@ -124,6 +126,7 @@ pub use synonyms::{STANDARD_SYNONYMS, canonical_relations, load_standard_synonym
 #[cfg(feature = "embeddings")]
 pub use embedder::{
     Embedder, EmbedderConfig, EmbedderModel, RemoteEmbedderConfig, default_embedder_cache_dir,
+    embedder_model_id,
 };
 
 #[cfg(feature = "chunking")]

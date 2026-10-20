@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ndn.graphrag-work</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/ndn/.cargo/bin/graphrag</string>
+        <string>work</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>900</integer>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>LowPriorityIO</key>
+    <true/>
+    <key>Nice</key>
+    <integer>10</integer>
+    <key>StandardOutPath</key>
+    <string>/Users/ndn/Library/Logs/graphrag/work.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/ndn/Library/Logs/graphrag/work.err.log</string>
+</dict>
+</plist>

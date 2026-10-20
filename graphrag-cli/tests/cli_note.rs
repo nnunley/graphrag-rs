@@ -21,14 +21,13 @@ fn note_writes_chunk_to_db() {
     Command::cargo_bin("graphrag")
         .expect("binary exists")
         .env("GRAPHRAG_DATA_DIR", &data_dir)
+        .env("GRAPHRAG_BIN", "/usr/bin/true")
         .args(["note", "remember to drink water"])
         .assert()
         .success();
 
     let db = Database::open(&data_dir.join("graphrag.db")).expect("db opens");
-    let stats = db
-        .store_stats("conversations")
-        .expect("default store exists");
+    let stats = db.store_stats("memory").expect("the memory store exists");
     // store_stats returns (chunk_count, entity_count, relation_count)
     assert_eq!(stats.0, 1, "expected exactly one chunk after one note");
 }

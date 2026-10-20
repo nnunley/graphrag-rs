@@ -1,19 +1,17 @@
 use clap::{Parser, Subcommand};
 use graphrag_core::{
-    BruteForceVectorSource, Database, Embedder, EmbedderConfig, EmbedderModel, LexicalIndex,
-    RemoteEmbedderConfig, VectorCandidateSource, default_embedder_cache_dir,
-    load_standard_synonyms, load_standard_type_synonyms,
+    Database, Embedder, EmbedderConfig, EmbedderModel, RemoteEmbedderConfig,
+    default_embedder_cache_dir,
 };
-use graphrag_llm::{ChatClient, ChatPrompt, OllamaChatClient};
-use std::collections::HashMap;
 mod llm_strategy;
+mod memory;
 
 use std::io::{BufRead, Write};
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-const DEFAULT_STORE: &str = "conversations";
+const DEFAULT_STORE: &str = memory::MEMORY_STORE;
 
 #[derive(Parser)]
 #[command(name = "graphrag", about = "Local hybrid graph + vector memory")]
@@ -31,8 +29,14 @@ enum Commands {
         /// Optional source identifier
         #[arg(long)]
         source: Option<String>,
-        /// Store name (default: conversations)
+        /// Group(s) the note belongs to (default: conversations)
+        #[arg(long = "group")]
+        groups: Vec<String>,
+        /// Stable key (file path, page id); new text under a key replaces the old
         #[arg(long)]
+        doc_key: Option<String>,
+        /// Deprecated alias for --group
+        #[arg(long, hide = true)]
         store: Option<String>,
     },
     /// Search the knowledge graph
@@ -42,8 +46,11 @@ enum Commands {
         /// Maximum number of hits to return (default: 5)
         #[arg(long, default_value_t = 5)]
         top: usize,
-        /// Store name (default: conversations)
-        #[arg(long)]
+        /// Restrict to these groups (and their subgroups)
+        #[arg(long = "in")]
+        groups: Vec<String>,
+        /// Deprecated alias for --in
+        #[arg(long, hide = true)]
         store: Option<String>,
     },
     /// Show recent notes
@@ -51,39 +58,56 @@ enum Commands {
         /// Maximum number of notes to show (default: 20)
         #[arg(long, default_value_t = 20)]
         limit: usize,
-        /// Store name (default: conversations)
-        #[arg(long)]
+        /// Deprecated; the log covers the whole memory
+        #[arg(long, hide = true)]
         store: Option<String>,
     },
-    /// Rebuild vector indexes for existing chunks
+    /// Embed chunks whose embedding is missing or stale
     BackfillEmbeddings {
-        /// Store name (default: conversations)
-        #[arg(long)]
+        /// Deprecated; ignored
+        #[arg(long, hide = true)]
         store: Option<String>,
     },
-    /// Detect and persist communities for an existing entity graph
+    /// Run the ingestion worker: embed, extract, generalize, cluster, summarize
+    Work {
+        /// Restrict to a group (reserved; all groups today)
+        #[arg(long = "in")]
+        groups: Vec<String>,
+        /// Process one batch, then exit
+        #[arg(long)]
+        once: bool,
+        /// Stop after this many work items
+        #[arg(long)]
+        max_items: Option<usize>,
+        /// Retry steps that failed before
+        #[arg(long)]
+        retry_failed: bool,
+        /// Allow superseding more than 10% of extractions (model/prompt change)
+        #[arg(long)]
+        accept_reextract: bool,
+        /// Pause background workers (creates the pause flag) and exit
+        #[arg(long)]
+        pause: bool,
+        /// Resume background workers (removes the pause flag) and exit
+        #[arg(long)]
+        resume: bool,
+    },
+    /// Deprecated alias for `work`
     Enrich {
-        /// Store name (default: conversations)
-        #[arg(long)]
+        #[arg(long, hide = true)]
         store: Option<String>,
-        /// Clear existing communities before detecting new ones
-        #[arg(long)]
+        #[arg(long, hide = true)]
         clear: bool,
-        /// Extract entities and relations from chunks via Ollama before building communities
-        #[arg(long)]
+        #[arg(long, hide = true)]
         extract: bool,
-        /// Maximum Leiden iterations
-        #[arg(long, default_value_t = 100)]
-        max_iterations: usize,
-        /// Leiden convergence tolerance
-        #[arg(long, default_value_t = 1e-6)]
-        tolerance: f64,
-        /// Maximum hierarchy levels (1 = flat)
-        #[arg(long, default_value_t = 1)]
-        levels: i32,
-        /// Minimum community size to partition further
-        #[arg(long, default_value_t = 5)]
-        min_size: usize,
+        #[arg(long, hide = true)]
+        max_iterations: Option<usize>,
+        #[arg(long, hide = true)]
+        tolerance: Option<f64>,
+        #[arg(long, hide = true)]
+        levels: Option<i32>,
+        #[arg(long, hide = true)]
+        min_size: Option<usize>,
     },
     /// Export a store as JSON Lines to stdout
     Export {
@@ -134,10 +158,10 @@ enum Commands {
         #[arg(long)]
         limit: Option<usize>,
     },
-    /// Report pipeline phase status: what exists, what is ready, what changed
+    /// Report ingestion status per group and step
     Status {
-        /// Store name
-        #[arg(long)]
+        /// Deprecated; status covers the whole memory
+        #[arg(long, hide = true)]
         store: Option<String>,
         /// Emit JSON instead of a human summary
         #[arg(long)]
@@ -200,16 +224,6 @@ impl StoragePaths {
     fn db_path(&self) -> PathBuf {
         self.data_dir.join("graphrag.db")
     }
-
-    /// Forward-compat sidecar for leit Phase 2 cursor-based persistence.
-    /// Today these bytes can't be reloaded into a searchable index — we
-    /// write them anyway so the on-disk format is in place when leit ships
-    /// the load path.
-    fn lexical_segment_path(&self, store: &str) -> PathBuf {
-        self.data_dir
-            .join("indexes")
-            .join(format!("{store}.leitseg"))
-    }
 }
 
 fn open_db() -> Result<Database, String> {
@@ -221,8 +235,8 @@ fn open_db_at(paths: &StoragePaths) -> Result<Database, String> {
     Database::open(&paths.db_path()).map_err(|e| format!("open db: {e}"))
 }
 
-fn open_embedder() -> Result<Embedder, String> {
-    let model = std::env::var("GRAPHRAG_EMBED_MODEL")
+fn embedder_model() -> EmbedderModel {
+    std::env::var("GRAPHRAG_EMBED_MODEL")
         .ok()
         .and_then(|model| match model.to_lowercase().as_str() {
             "minilm" | "mini" => Some(EmbedderModel::MiniLM),
@@ -231,8 +245,11 @@ fn open_embedder() -> Result<Embedder, String> {
             "openai3" | "openai-3-small" | "openai3-small" => Some(EmbedderModel::OpenAI3Small),
             _ => None,
         })
-        .unwrap_or(EmbedderModel::NomicEmbedText);
+        .unwrap_or(EmbedderModel::NomicEmbedText)
+}
 
+fn open_embedder() -> Result<Embedder, String> {
+    let model = embedder_model();
     let remote_config = if model.is_remote() {
         let api_key = std::env::var("GRAPHRAG_OPENAI_API_KEY")
             .or_else(|_| std::env::var("OPENAI_API_KEY"))
@@ -260,227 +277,8 @@ fn open_embedder() -> Result<Embedder, String> {
     .map_err(|e| format!("embedder: {e}"))
 }
 
-fn cmd_note(text: &str, source: Option<&str>, store: &str) -> Result<(), String> {
-    let paths = StoragePaths::from_env();
-    let embedder = open_embedder()?;
-    let chunk_id = cmd_note_with_embedder(&paths, text, source, store, |text| {
-        embedder.embed(text).map_err(|e| e.to_string())
-    })?;
-    println!("ok chunk_id={chunk_id}");
-    Ok(())
-}
-
-fn cmd_note_with_embedder<F>(
-    paths: &StoragePaths,
-    text: &str,
-    source: Option<&str>,
-    store: &str,
-    embed: F,
-) -> Result<i64, String>
-where
-    F: Fn(&str) -> Result<Vec<f32>, String>,
-{
-    let embedding = embed(text)?;
-    let db = open_db_at(paths)?;
-    let store_record = match db.get_store(store) {
-        Ok(store_record) => store_record,
-        Err(_) => db
-            .create_store(store, embedding.len())
-            .map_err(|e| format!("create store {store}: {e}"))?,
-    };
-    if store_record.dim != embedding.len() {
-        return Err(format!(
-            "dimension mismatch: store has {}, embedder produced {}",
-            store_record.dim,
-            embedding.len()
-        ));
-    }
-
-    let chunk_id = db
-        .add_chunk(store, text, source, None)
-        .map_err(|e| format!("add chunk: {e}"))?;
-    db.set_chunk_embedding(chunk_id, &embedding)
-        .map_err(|e| format!("store embedding: {e}"))?;
-    rebuild_lexical_sidecar(paths, &db, store)?;
-    Ok(chunk_id)
-}
-
-/// Rebuild the leit segment sidecar for a store. Called after every chunk
-/// add; cheap at small corpora, scales with chunk count. leit Phase 1 has no
-/// incremental-add API, so full rebuild is the only option.
-fn rebuild_lexical_sidecar(paths: &StoragePaths, db: &Database, store: &str) -> Result<(), String> {
-    let chunks = db
-        .list_chunks(store)
-        .map_err(|e| format!("list chunks for lexical rebuild: {e}"))?;
-    let Some(index) = LexicalIndex::build_from_chunks(&chunks)
-        .map_err(|e| format!("build lexical index: {e}"))?
-    else {
-        // Empty store — nothing to write. Don't leave a stale sidecar.
-        let path = paths.lexical_segment_path(store);
-        let _ = std::fs::remove_file(&path);
-        return Ok(());
-    };
-    let bytes = index
-        .to_segment_bytes()
-        .map_err(|e| format!("serialize lexical segment: {e}"))?;
-    let path = paths.lexical_segment_path(store);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("create lexical dir: {e}"))?;
-    }
-    std::fs::write(&path, &bytes)
-        .map_err(|e| format!("write lexical segment {}: {e}", path.display()))?;
-    Ok(())
-}
-
-fn cmd_backfill_embeddings(store: &str) -> Result<(), String> {
-    let paths = StoragePaths::from_env();
-    eprintln!("initializing embedder...");
-    let embedder = open_embedder()?;
-    let count = cmd_backfill_embeddings_with_embedder(&paths, store, |text| {
-        embedder.embed(text).map_err(|e| e.to_string())
-    })?;
-    println!("store={store} backfilled={count}");
-    Ok(())
-}
-
-fn cmd_backfill_embeddings_with_embedder<F>(
-    paths: &StoragePaths,
-    store: &str,
-    embed: F,
-) -> Result<usize, String>
-where
-    F: Fn(&str) -> Result<Vec<f32>, String>,
-{
-    let db = open_db_at(paths)?;
-    let store_record = db
-        .get_store(store)
-        .map_err(|e| format!("get store {store}: {e}"))?;
-    let chunks = db
-        .list_chunks(store)
-        .map_err(|e| format!("list chunks: {e}"))?;
-    for (idx, chunk) in chunks.iter().enumerate() {
-        let embedding = embed(&chunk.content)?;
-        if embedding.len() != store_record.dim {
-            return Err(format!(
-                "dimension mismatch for chunk {}: store has {}, embedder produced {}",
-                chunk.id,
-                store_record.dim,
-                embedding.len()
-            ));
-        }
-        db.set_chunk_embedding(chunk.id, &embedding)
-            .map_err(|e| format!("store embedding for chunk {}: {e}", chunk.id))?;
-        let completed = idx + 1;
-        if completed == chunks.len() || completed % 25 == 0 {
-            eprintln!("backfilled {completed}/{} chunks", chunks.len());
-        }
-    }
-
-    Ok(chunks.len())
-}
-
-fn cmd_ask(query: &str, top: usize, store: &str) -> Result<(), String> {
-    // Hybrid recall: brute-force cosine (semantic) + leit BM25 (lexical), fused via RRF.
-    //
-    // Mirrors the MCP server's tool_recall in shape (same embedder, same
-    // chunk store), but stays CLI-shaped: rebuild the leit index per
-    // invocation rather than caching, since the CLI is one-shot.
-    let paths = StoragePaths::from_env();
-    let db = open_db_at(&paths)?;
-    let store_record = match db.get_store(store) {
-        Ok(s) => s,
-        Err(_) => return Ok(()),
-    };
-
-    // --- Lane 1: exact vector recall ---
-    let embedder = open_embedder()?;
-    let embedding = embedder.embed(query).map_err(|e| e.to_string())?;
-    if embedding.len() != store_record.dim {
-        return Err(format!(
-            "dimension mismatch: embedder produced {}, store has {}",
-            embedding.len(),
-            store_record.dim
-        ));
-    }
-    // Pull a larger candidate pool than `top` so RRF has overlap to fuse.
-    let candidate_k = top.max(5) * 4;
-    let vector_source =
-        BruteForceVectorSource::for_store(&db, store).map_err(|e| format!("load vectors: {e}"))?;
-    let vector_hits = vector_source
-        .top_candidates(&embedding, candidate_k)
-        .map_err(|e| format!("vector search: {e}"))?;
-
-    // --- Lane 2: leit BM25 recall (rebuild per query) ---
-    let chunks_all = db
-        .list_chunks(store)
-        .map_err(|e| format!("list chunks: {e}"))?;
-    let lexical_hits = match LexicalIndex::build_from_chunks(&chunks_all)
-        .map_err(|e| format!("build lexical: {e}"))?
-    {
-        Some(idx) => idx
-            .search(query, candidate_k)
-            .map_err(|e| format!("lexical search: {e}"))?,
-        None => Vec::new(),
-    };
-
-    if vector_hits.is_empty() && lexical_hits.is_empty() {
-        return Ok(());
-    }
-
-    // --- Fuse via RRF (k=60, leit default) ---
-    let vector_ranked: Vec<graphrag_core::leit_fusion::RankedResult> = vector_hits
-        .iter()
-        .enumerate()
-        .map(|(i, h)| graphrag_core::leit_fusion::RankedResult::new(h.chunk_id.to_string(), i + 1))
-        .collect();
-    let lexical_ranked: Vec<graphrag_core::leit_fusion::RankedResult> = lexical_hits
-        .iter()
-        .enumerate()
-        .map(|(i, (id, _))| graphrag_core::leit_fusion::RankedResult::new(id.to_string(), i + 1))
-        .collect();
-    let fused = graphrag_core::leit_fusion::fuse_default(&[vector_ranked, lexical_ranked]);
-
-    // --- Render top-k ---
-    let final_ids: Vec<i64> = fused
-        .iter()
-        .take(top)
-        .filter_map(|f| f.id.parse().ok())
-        .collect();
-    let chunks = db
-        .get_chunks_by_ids(&final_ids)
-        .map_err(|e| format!("fetch chunks: {e}"))?;
-    let chunks_by_id: HashMap<i64, &graphrag_core::Chunk> =
-        chunks.iter().map(|c| (c.id, c)).collect();
-    // Also surface per-lane source/score for transparency during the
-    // hybrid-recall bringup. Drop these badges once the tuning is stable.
-    // `vec=` is cosine similarity (higher = better), from BruteForceVectorSource.
-    let vec_lookup: HashMap<i64, f32> = vector_hits.iter().map(|h| (h.chunk_id, h.score)).collect();
-    let lex_lookup: HashMap<i64, f32> = lexical_hits.iter().copied().collect();
-    for (rank, f) in fused.iter().take(top).enumerate() {
-        let Ok(id) = f.id.parse::<i64>() else {
-            continue;
-        };
-        let Some(chunk) = chunks_by_id.get(&id) else {
-            continue;
-        };
-        let src = chunk.source.as_deref().unwrap_or("-");
-        let vec_badge = vec_lookup
-            .get(&id)
-            .map(|s| format!("vec={s:.3}"))
-            .unwrap_or_else(|| "vec=-".to_string());
-        let lex_badge = lex_lookup
-            .get(&id)
-            .map(|s| format!("lex={s:.3}"))
-            .unwrap_or_else(|| "lex=-".to_string());
-        println!(
-            "#{rank}\trrf={:.4}\t{vec_badge}\t{lex_badge}\t{}\t[{}]\t{}",
-            f.score, chunk.created_at, src, chunk.content
-        );
-    }
-    Ok(())
-}
-
-fn cmd_log(limit: usize, store: &str) -> Result<(), String> {
+fn cmd_log(limit: usize) -> Result<(), String> {
+    let store = memory::MEMORY_STORE;
     let db = open_db()?;
     if db.get_store(store).is_err() {
         // Empty store / never noted to: render nothing rather than erroring.
@@ -494,122 +292,6 @@ fn cmd_log(limit: usize, store: &str) -> Result<(), String> {
         println!("{}\t[{}]\t{}", c.created_at, src, c.content);
     }
     Ok(())
-}
-
-fn cmd_enrich(
-    store: &str,
-    clear: bool,
-    extract: bool,
-    max_iterations: usize,
-    tolerance: f64,
-    levels: i32,
-    min_size: usize,
-) -> Result<(), String> {
-    if levels < 1 {
-        return Err("--levels must be at least 1".to_string());
-    }
-    if min_size < 1 {
-        return Err("--min-size must be at least 1".to_string());
-    }
-
-    let db = open_db()?;
-    let _ = db
-        .get_store(store)
-        .map_err(|e| format!("get store {store}: {e}"))?;
-
-    load_standard_synonyms(&db).map_err(|e| format!("load relation synonyms: {e}"))?;
-    load_standard_type_synonyms(&db).map_err(|e| format!("load entity type synonyms: {e}"))?;
-
-    let extracted = if extract {
-        let client = OllamaChatClient::from_env()?;
-        Some(extract_entities_for_chunks(
-            &db,
-            store,
-            &client,
-            client.model(),
-        )?)
-    } else {
-        None
-    };
-
-    if clear {
-        db.clear_communities(store)
-            .map_err(|e| format!("clear communities: {e}"))?;
-    }
-
-    let entities = db
-        .list_entities(store)
-        .map_err(|e| format!("list entities: {e}"))?;
-    let relations = db
-        .list_relations(store)
-        .map_err(|e| format!("list relations: {e}"))?;
-
-    // One clustering path for every surface: the weighted projection,
-    // fingerprinted and replaced as a run (no hardcoded unit weights).
-    let _ = (max_iterations, tolerance);
-    let config = graphrag_core::fingerprints::CommunityConfig {
-        max_levels: levels,
-        min_size_to_split: min_size,
-        ..Default::default()
-    };
-    let run = db
-        .build_community_run(store, &config)
-        .map_err(|e| format!("community run: {e}"))?;
-    let (community_count, depth, modularity) = (run.communities, run.levels, run.modularity);
-
-    println!(
-        "store={store} entities={} relations={} communities={} depth={} modularity={:.6}",
-        entities.len(),
-        relations.len(),
-        community_count,
-        depth,
-        modularity
-    );
-    if let Some(extracted) = extracted {
-        eprintln!("extracted={extracted} entity_relations");
-    }
-    Ok(())
-}
-
-fn extract_entities_for_chunks<C: ChatClient>(
-    db: &Database,
-    store: &str,
-    client: &C,
-    model: &str,
-) -> Result<usize, String> {
-    use graphrag_core::mr::{ExtractResult, apply_extract, plan_extract};
-
-    let strategy = llm_strategy::LlmStrategy::for_model(model);
-    let units = plan_extract(db, store, model, &strategy, None)
-        .map_err(|e| format!("plan extraction: {e}"))?;
-    let total = units.len();
-    let mut extracted = 0;
-
-    for (idx, unit) in units.into_iter().enumerate() {
-        let prompt = ChatPrompt {
-            system: unit.system,
-            user: unit.user,
-            max_tokens: 1000,
-        };
-        let response = client.complete_with_format(&prompt, unit.format.as_ref())?;
-        let result = ExtractResult {
-            chunk_id: unit.chunk_id,
-            model: unit.model,
-            provenance_nonce: unit
-                .provenance_nonce
-                .ok_or_else(|| "planned extraction missing provenance nonce".to_string())?,
-            response,
-        };
-        extracted += apply_extract(db, store, &strategy, &[result])
-            .map_err(|e| format!("apply extraction: {e}"))?;
-
-        let completed = idx + 1;
-        if completed == total || completed % 25 == 0 {
-            eprintln!("extracted metadata for {completed}/{total} chunks");
-        }
-    }
-
-    Ok(extracted)
 }
 
 fn cmd_export(store: &str) -> Result<(), String> {
@@ -892,34 +574,6 @@ fn cmd_embed(store: &str, limit: Option<usize>) -> Result<(), String> {
     Ok(())
 }
 
-fn cmd_status(store: &str, json: bool) -> Result<(), String> {
-    let db = open_db()?;
-    let st = graphrag_core::mr::pipeline_status(&db, store).map_err(|e| format!("status: {e}"))?;
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&st).map_err(|e| format!("serialize: {e}"))?
-        );
-        return Ok(());
-    }
-    println!("store: {}", st.store);
-    println!(
-        "{:<12} {:>7} {:>7} {:>8} {:>8}  GUIDANCE",
-        "PHASE", "TOTAL", "DONE", "PENDING", "BLOCKED"
-    );
-    for p in &st.phases {
-        println!(
-            "{:<12} {:>7} {:>7} {:>8} {:>8}  {}",
-            p.phase, p.total, p.done, p.pending, p.blocked, p.guidance
-        );
-        for (level, count, done) in &p.levels {
-            println!("             level {level}: {done}/{count} summarized");
-        }
-    }
-    println!("\nnext: {}", st.next);
-    Ok(())
-}
-
 fn cmd_provenance(store: &str, nonce: &str) -> Result<(), String> {
     let db = open_db()?;
     let provenance = db
@@ -969,41 +623,136 @@ fn cmd_provenance(store: &str, nonce: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The embedder's identity and dimension, from the same environment
+/// `open_embedder` reads, without loading the model.
+fn embedder_identity() -> (String, usize) {
+    let model = embedder_model();
+    (graphrag_core::embedder_model_id(model), model.dimension())
+}
+
+fn cmd_work(flags: memory::WorkFlags, pause: bool, resume: bool) -> ExitCode {
+    let dir = data_dir();
+    let flag = graphrag_worker::pause_flag(&dir);
+    if pause || resume {
+        let r = if pause {
+            std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&flag, ""))
+        } else {
+            match std::fs::remove_file(&flag) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                other => other,
+            }
+        };
+        return match r {
+            Ok(()) => {
+                println!("worker {}", if pause { "paused" } else { "resumed" });
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    let emb = match open_embedder() {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::from(70);
+        }
+    };
+    ExitCode::from(memory::work(&dir, &flags, &emb).code() as u8)
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
         Commands::Note {
             text,
             source,
+            mut groups,
+            doc_key,
             store,
-        } => cmd_note(
-            &text,
-            source.as_deref(),
-            store.as_deref().unwrap_or(DEFAULT_STORE),
-        ),
-        Commands::Log { limit, store } => cmd_log(limit, store.as_deref().unwrap_or(DEFAULT_STORE)),
-        Commands::BackfillEmbeddings { store } => {
-            cmd_backfill_embeddings(store.as_deref().unwrap_or(DEFAULT_STORE))
+        } => {
+            memory::store_alias(store, &mut groups);
+            open_embedder().and_then(|emb| {
+                let r = memory::note(
+                    &data_dir(),
+                    &text,
+                    &groups,
+                    source.as_deref(),
+                    doc_key.as_deref(),
+                    &emb,
+                )?;
+                println!(
+                    "ok document_id={} chunks={}{}",
+                    r.document_id,
+                    r.chunks,
+                    if r.existing { " (existing text)" } else { "" }
+                );
+                Ok(())
+            })
         }
-        Commands::Enrich {
+        Commands::Log { limit, store } => {
+            let mut ignored = Vec::new();
+            memory::store_alias(store, &mut ignored);
+            cmd_log(limit)
+        }
+        Commands::BackfillEmbeddings { store } => {
+            let mut ignored = Vec::new();
+            memory::store_alias(store, &mut ignored);
+            open_embedder().and_then(|emb| {
+                let n = memory::backfill(&data_dir(), &emb)?;
+                println!("backfilled={n}");
+                Ok(())
+            })
+        }
+        Commands::Work {
+            groups,
+            once,
+            max_items,
+            retry_failed,
+            accept_reextract,
+            pause,
+            resume,
+        } => {
+            return cmd_work(
+                memory::WorkFlags {
+                    groups,
+                    once,
+                    max_items,
+                    retry_failed,
+                    accept_reextract,
+                },
+                pause,
+                resume,
+            );
+        }
+        Commands::Enrich { .. } => {
+            eprintln!("warning: `enrich` is deprecated; use `graphrag work`");
+            return cmd_work(
+                memory::WorkFlags {
+                    groups: vec![],
+                    once: false,
+                    max_items: None,
+                    retry_failed: false,
+                    accept_reextract: false,
+                },
+                false,
+                false,
+            );
+        }
+        Commands::Ask {
+            query,
+            top,
+            mut groups,
             store,
-            clear,
-            extract,
-            max_iterations,
-            tolerance,
-            levels,
-            min_size,
-        } => cmd_enrich(
-            store.as_deref().unwrap_or(DEFAULT_STORE),
-            clear,
-            extract,
-            max_iterations,
-            tolerance,
-            levels,
-            min_size,
-        ),
-        Commands::Ask { query, top, store } => {
-            cmd_ask(&query, top, store.as_deref().unwrap_or(DEFAULT_STORE))
+        } => {
+            memory::store_alias(store, &mut groups);
+            open_embedder().and_then(|emb| {
+                let hits = memory::ask(&data_dir(), &query, &groups, top, &emb)?;
+                memory::print_hits(&hits);
+                Ok(())
+            })
         }
         Commands::Export { store } => cmd_export(&store),
         Commands::Chunk {
@@ -1035,7 +784,14 @@ fn main() -> ExitCode {
             cmd_embed(store.as_deref().unwrap_or(DEFAULT_STORE), limit)
         }
         Commands::Status { store, json } => {
-            cmd_status(store.as_deref().unwrap_or(DEFAULT_STORE), json)
+            let mut ignored = Vec::new();
+            memory::store_alias(store, &mut ignored);
+            let (id, dim) = embedder_identity();
+            memory::status(
+                &data_dir(),
+                json,
+                &memory::status_config(&data_dir(), id, dim),
+            )
         }
         Commands::Plan {
             stage,
@@ -1067,114 +823,81 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use graphrag_core::text_embedder::TextEmbedder;
+    use graphrag_core::{BruteForceVectorSource, VectorCandidateSource};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    fn temp_paths(label: &str) -> StoragePaths {
-        let pid = std::process::id();
+    fn temp_dir(label: &str) -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let data_dir =
-            std::env::temp_dir().join(format!("graphrag-cli-unit-{label}-{pid}-{nanos}"));
-        StoragePaths { data_dir }
+        std::env::temp_dir().join(format!(
+            "graphrag-cli-unit-{label}-{}-{nanos}",
+            std::process::id()
+        ))
     }
 
-    fn fake_embed(text: &str) -> Result<Vec<f32>, String> {
-        if text.contains("beta") {
-            Ok(vec![0.0, 1.0, 0.0])
-        } else {
-            Ok(vec![1.0, 0.0, 0.0])
+    struct FakeEmbedder;
+
+    impl TextEmbedder for FakeEmbedder {
+        fn id(&self) -> String {
+            "fake".into()
         }
-    }
-
-    struct FakeChatClient;
-
-    impl ChatClient for FakeChatClient {
-        fn complete(&self, _prompt: &graphrag_llm::ChatPrompt) -> Result<String, String> {
-            Ok(r#"{"entities":[{"head":"Alice","head_type":"Person","relation":"uses","tail":"GraphRAG","tail_type":"Software"}]}"#.to_string())
+        fn dim(&self) -> usize {
+            3
+        }
+        fn embed(&self, text: &str) -> Result<Vec<f32>, graphrag_core::GraphRagError> {
+            Ok(if text.contains("beta") {
+                vec![0.0, 1.0, 0.0]
+            } else {
+                vec![1.0, 0.0, 0.0]
+            })
         }
     }
 
     #[test]
     fn note_writes_chunk_and_vector_index() {
-        let paths = temp_paths("note-vector-index");
-
-        let chunk_id = cmd_note_with_embedder(
-            &paths,
-            "alpha note",
-            Some("unit"),
-            DEFAULT_STORE,
-            fake_embed,
-        )
-        .expect("note should write db and embedding");
-
-        let db = Database::open(&paths.db_path()).expect("db opens");
-        let store = db.get_store(DEFAULT_STORE).expect("store exists");
-        assert_eq!(store.dim, 3);
-
-        let source =
-            BruteForceVectorSource::for_store(&db, DEFAULT_STORE).expect("vector source loads");
-        let results = source
-            .top_candidates(&[1.0, 0.0, 0.0], 1)
-            .expect("search works");
-        assert_eq!(results[0].chunk_id, chunk_id);
+        // SAFETY: unit tests don't read GRAPHRAG_BIN concurrently with this write.
+        unsafe { std::env::set_var("GRAPHRAG_BIN", "/usr/bin/true") };
+        let dir = temp_dir("note-vector-index");
+        let r = memory::note(&dir, "alpha note", &[], Some("unit"), None, &FakeEmbedder).unwrap();
+        let db = Database::open(&dir.join("graphrag.db")).unwrap();
+        assert_eq!(db.get_store(memory::MEMORY_STORE).unwrap().dim, 3);
+        let chunk = db.document_chunks(r.document_id).unwrap()[0];
+        let source = BruteForceVectorSource::for_store(&db, memory::MEMORY_STORE).unwrap();
+        assert_eq!(
+            source.top_candidates(&[1.0, 0.0, 0.0], 1).unwrap()[0].chunk_id,
+            chunk
+        );
     }
 
     #[test]
-    fn backfill_embeddings_rebuilds_index_for_existing_chunks() {
-        let paths = temp_paths("backfill-vector-index");
-        let db = Database::open(&paths.db_path()).expect("db opens");
-        db.create_store(DEFAULT_STORE, 3).expect("store created");
-        let alpha_id = db
-            .add_chunk(DEFAULT_STORE, "alpha note", None, None)
-            .expect("alpha chunk");
-        let beta_id = db
-            .add_chunk(DEFAULT_STORE, "beta note", None, None)
-            .expect("beta chunk");
-
-        let count = cmd_backfill_embeddings_with_embedder(&paths, DEFAULT_STORE, fake_embed)
-            .expect("backfill should store embeddings");
-
-        assert_eq!(count, 2);
-        let source =
-            BruteForceVectorSource::for_store(&db, DEFAULT_STORE).expect("vector source loads");
-        let alpha = source
-            .top_candidates(&[1.0, 0.0, 0.0], 1)
-            .expect("alpha search");
-        let beta = source
-            .top_candidates(&[0.0, 1.0, 0.0], 1)
-            .expect("beta search");
-        assert_eq!(alpha[0].chunk_id, alpha_id);
-        assert_eq!(beta[0].chunk_id, beta_id);
-    }
-
-    #[test]
-    fn extract_entities_for_chunks_persists_llm_metadata() {
-        let paths = temp_paths("extract-entities");
-        let db = Database::open(&paths.db_path()).expect("db opens");
-        db.create_store(DEFAULT_STORE, 3).expect("store created");
-        let chunk_id = db
-            .add_chunk(DEFAULT_STORE, "Alice uses GraphRAG.", None, None)
-            .expect("chunk");
-
-        // "nemotron" resolves to JsonStrategy, matching FakeChatClient's JSON output.
-        let extracted =
-            extract_entities_for_chunks(&db, DEFAULT_STORE, &FakeChatClient, "nemotron3:33b")
-                .expect("metadata extraction succeeds");
-
-        assert_eq!(extracted, 1);
-        let alice = db
-            .get_entity_by_name(DEFAULT_STORE, "Alice")
-            .expect("head entity");
-        let graph = db
-            .get_entity_by_name(DEFAULT_STORE, "GraphRAG")
-            .expect("tail entity");
-        let relations = db.get_relations_for_entity(alice.id).expect("relations");
-        let linked = db.get_entities_for_chunk(chunk_id).expect("chunk entities");
-
-        assert_eq!(relations[0].tail_id, graph.id);
-        assert!(linked.iter().any(|entity| entity.name == "Alice"));
-        assert!(linked.iter().any(|entity| entity.name == "GraphRAG"));
+    fn backfill_embeds_only_missing_chunks() {
+        let dir = temp_dir("backfill");
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::open(&dir.join("graphrag.db")).unwrap();
+        db.create_store(memory::MEMORY_STORE, 3).unwrap();
+        let alpha = db
+            .add_chunk(memory::MEMORY_STORE, "alpha note", None, None)
+            .unwrap();
+        let beta = db
+            .add_chunk(memory::MEMORY_STORE, "beta note", None, None)
+            .unwrap();
+        assert_eq!(memory::backfill(&dir, &FakeEmbedder).unwrap(), 2);
+        assert_eq!(
+            memory::backfill(&dir, &FakeEmbedder).unwrap(),
+            0,
+            "current chunks are skipped"
+        );
+        let source = BruteForceVectorSource::for_store(&db, memory::MEMORY_STORE).unwrap();
+        assert_eq!(
+            source.top_candidates(&[1.0, 0.0, 0.0], 1).unwrap()[0].chunk_id,
+            alpha
+        );
+        assert_eq!(
+            source.top_candidates(&[0.0, 1.0, 0.0], 1).unwrap()[0].chunk_id,
+            beta
+        );
     }
 }

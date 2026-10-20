@@ -20,6 +20,7 @@ fn log_shows_recent_notes() {
     Command::cargo_bin("graphrag")
         .unwrap()
         .env("GRAPHRAG_DATA_DIR", &data_dir)
+        .env("GRAPHRAG_BIN", "/usr/bin/true")
         .args([
             "note",
             "the auto_dream cycle clusters bag-of-words on shell exhaust",
@@ -30,6 +31,7 @@ fn log_shows_recent_notes() {
     Command::cargo_bin("graphrag")
         .unwrap()
         .env("GRAPHRAG_DATA_DIR", &data_dir)
+        .env("GRAPHRAG_BIN", "/usr/bin/true")
         .arg("log")
         .assert()
         .success()

@@ -319,6 +319,24 @@ impl Database {
             .execute("DELETE FROM step_status WHERE state = 'failed'", [])?)
     }
 
+    /// `(fp, state)` stored for a step, if any.
+    pub fn step_fp(
+        &self,
+        kind: SubjectKind,
+        id: i64,
+        step: Step,
+    ) -> Result<Option<(String, String)>, GraphRagError> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT fp, state FROM step_status WHERE subject_kind = ?1 AND subject_id = ?2 AND step = ?3
+                   AND fp IS NOT NULL",
+                params![kind.as_str(), id, step.as_str()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?)
+    }
+
     /// Attempts recorded so far for a step (0 when none).
     pub fn step_attempts(
         &self,

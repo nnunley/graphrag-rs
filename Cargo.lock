@@ -1308,7 +1308,9 @@ dependencies = [
  "dirs 5.0.1",
  "graphrag-core",
  "graphrag-llm",
+ "graphrag-worker",
  "predicates",
+ "rusqlite",
  "serde_json",
  "tempfile",
 ]

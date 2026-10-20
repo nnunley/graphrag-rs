@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 graphrag-core = { path = "../graphrag-core", features = ["embeddings", "embeddings_remote", "code"] }
 graphrag-llm = { path = "../graphrag-llm" }
+graphrag-worker = { path = "../graphrag-worker" }
 clap = { version = "4", features = ["derive"] }
 serde_json = "1.0"
 dirs = "5"
@@ -20,3 +21,4 @@ assert_cmd = "2"
 predicates = "3"
 tempfile = "3"
 serde_json = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
