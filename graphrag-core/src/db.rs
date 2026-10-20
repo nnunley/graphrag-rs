@@ -101,10 +101,47 @@ impl Database {
         }
 
         let conn = Connection::open(path)?;
+        conn.busy_timeout(std::time::Duration::from_millis(5000))?;
+        conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get::<_, String>(0))?;
+        conn.execute_batch("PRAGMA foreign_keys = ON")?;
         let db = Self { conn };
         db.init_schema()?;
         db.migrate_schema()?;
+        crate::schema_v2::apply_v2(&db.conn)?;
         Ok(db)
+    }
+
+    /// `PRAGMA user_version`: 2 once the one-graph schema is applied.
+    pub fn schema_version(&self) -> Result<i64, GraphRagError> {
+        Ok(self
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))?)
+    }
+
+    /// `(journal_mode, busy_timeout ms, foreign_keys)` of this connection.
+    pub fn connection_pragmas(&self) -> Result<(String, i64, i64), GraphRagError> {
+        let journal = self
+            .conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
+        let busy = self
+            .conn
+            .query_row("PRAGMA busy_timeout", [], |r| r.get(0))?;
+        let fk = self
+            .conn
+            .query_row("PRAGMA foreign_keys", [], |r| r.get(0))?;
+        Ok((journal, busy, fk))
+    }
+
+    /// A chunk's text: its span sliced out of its document.
+    pub fn chunk_text(&self, chunk_id: i64) -> Result<String, GraphRagError> {
+        self.conn
+            .query_row(
+                "SELECT content FROM chunk_view WHERE id = ?1",
+                params![chunk_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| GraphRagError::Other(format!("chunk {chunk_id} not found")))
     }
 
     /// Run schema migrations for existing databases
@@ -300,15 +337,7 @@ impl Database {
                 embedding BLOB NOT NULL
             );
 
-            CREATE TABLE IF NOT EXISTS chunks (
-                id INTEGER PRIMARY KEY,
-                store TEXT NOT NULL REFERENCES stores(name) ON DELETE CASCADE,
-                content TEXT NOT NULL,
-                source TEXT,
-                metadata TEXT,
-                created_at TEXT DEFAULT (datetime('now'))
-            );
-            CREATE INDEX IF NOT EXISTS idx_chunks_store ON chunks(store);
+            -- chunks: created by schema_v2 (spans into documents, no text).
 
             CREATE TABLE IF NOT EXISTS entities (
                 id INTEGER PRIMARY KEY,
@@ -495,9 +524,29 @@ impl Database {
         // Verify store exists
         let _ = self.get_store(store)?;
 
+        // The text lives once, in a content-addressed document; the chunk
+        // is a span covering all of it.
+        let fp = crate::fingerprints::document_fp(content);
         self.conn.execute(
-            "INSERT INTO chunks (store, content, source, metadata) VALUES (?1, ?2, ?3, ?4)",
-            params![store, content, source, metadata],
+            "INSERT OR IGNORE INTO documents (content, content_fp, source) VALUES (?1, ?2, ?3)",
+            params![content, fp, source],
+        )?;
+        let document_id: i64 = self.conn.query_row(
+            "SELECT id FROM documents WHERE content_fp = ?1",
+            params![fp],
+            |r| r.get(0),
+        )?;
+        self.conn.execute(
+            "INSERT INTO chunks (store, document_id, span_start, span_end, content_fp, source, metadata)
+             VALUES (?1, ?2, 0, ?3, ?4, ?5, ?6)",
+            params![
+                store,
+                document_id,
+                content.len() as i64,
+                crate::token::fingerprint_text(content),
+                source,
+                metadata
+            ],
         )?;
 
         Ok(self.conn.last_insert_rowid())
@@ -512,7 +561,7 @@ impl Database {
         let _ = self.get_store(store)?;
         let mut stmt = self.conn.prepare(
             "SELECT id, store, content, source, metadata, created_at
-             FROM chunks
+             FROM chunk_view
              WHERE store = ?1
              ORDER BY id DESC
              LIMIT ?2",
@@ -539,7 +588,7 @@ impl Database {
         let _ = self.get_store(store)?;
         let mut stmt = self.conn.prepare(
             "SELECT id, store, content, source, metadata, created_at
-             FROM chunks
+             FROM chunk_view
              WHERE store = ?1
              ORDER BY id ASC",
         )?;
@@ -567,7 +616,7 @@ impl Database {
 
         let placeholders: Vec<String> = ids.iter().map(|_| "?".to_string()).collect();
         let sql = format!(
-            "SELECT id, store, content, source, metadata, created_at FROM chunks WHERE id IN ({})",
+            "SELECT id, store, content, source, metadata, created_at FROM chunk_view WHERE id IN ({})",
             placeholders.join(", ")
         );
 

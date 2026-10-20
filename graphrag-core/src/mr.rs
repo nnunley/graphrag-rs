@@ -182,7 +182,7 @@ pub fn apply_extracted_entities(
     let content = db
         .conn()
         .query_row(
-            "SELECT content FROM chunks WHERE id = ?1 AND store = ?2",
+            "SELECT content FROM chunk_view WHERE id = ?1 AND store = ?2",
             params![result.chunk_id, store],
             |row| row.get::<_, String>(0),
         )
@@ -211,7 +211,7 @@ impl Database {
         limit: Option<usize>,
     ) -> Result<Vec<(i64, String)>, GraphRagError> {
         let mut stmt = self.conn().prepare(
-            "SELECT c.id, c.content FROM chunks c
+            "SELECT c.id, c.content FROM chunk_view c
              WHERE c.store = ?1
                AND c.id NOT IN (SELECT chunk_id FROM extractions)
              ORDER BY c.id
