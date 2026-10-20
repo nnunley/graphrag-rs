@@ -77,6 +77,9 @@ pub mod chunker;
 #[cfg(feature = "chunking")]
 pub mod chunk_plan;
 
+#[cfg(feature = "chunking")]
+pub mod documents;
+
 #[cfg(feature = "code")]
 pub mod code_chunker;
 
