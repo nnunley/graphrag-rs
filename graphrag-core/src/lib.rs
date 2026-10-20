@@ -49,6 +49,7 @@
 //! ```
 
 pub mod assertions;
+pub mod attempts;
 pub mod capsule;
 pub mod capsule_store;
 pub mod db;
@@ -56,6 +57,7 @@ pub mod entity_types;
 pub mod error;
 pub mod export;
 pub mod fingerprints;
+pub mod generalize;
 pub mod leiden;
 pub mod lexical;
 pub mod mr;
