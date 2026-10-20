@@ -384,7 +384,7 @@ fn provenance_nonce_resolves_exact_entities_and_edges() {
 }
 
 #[test]
-fn entity_merge_preserves_and_deduplicates_extraction_provenance() {
+fn entity_merge_keeps_extraction_provenance_and_resolves() {
     let (_d, db) = db_with_chunks(1);
     let unit = plan_extract(&db, "s", "m", S, None).unwrap().remove(0);
     let nonce = unit.provenance_nonce.clone().unwrap();
@@ -416,14 +416,16 @@ fn entity_merge_preserves_and_deduplicates_extraction_provenance() {
 
     db.merge_entities(graph, alice).unwrap();
 
+    // Merges are same_as assertions now: provenance rows are untouched and
+    // reads resolve the merged entity to its representative.
     let after = db.get_extraction_provenance("s", &nonce).unwrap().unwrap();
-    assert_eq!(after.entities.len(), 1);
-    assert_eq!(after.entities[0].id, graph);
+    assert_eq!(after.entities.len(), 2);
     assert_eq!(after.relations.len(), 1);
     assert_eq!(
         (after.relations[0].head_id, after.relations[0].tail_id),
-        (graph, graph)
+        (alice, graph)
     );
+    assert_eq!(db.resolve_entity(alice).unwrap(), graph);
 }
 
 #[test]

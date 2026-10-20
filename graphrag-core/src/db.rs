@@ -662,7 +662,7 @@ impl Database {
             .conn
             .query_row(
                 "SELECT id FROM entities
-                 WHERE store = ?1 AND LOWER(TRIM(name)) = LOWER(TRIM(?2))
+                 WHERE store = ?1 AND kind = 'entity' AND LOWER(TRIM(name)) = LOWER(TRIM(?2))
                  ORDER BY id LIMIT 1",
                 params![store, name],
                 |row| row.get(0),
@@ -1410,86 +1410,27 @@ impl Database {
         Ok(similarities)
     }
 
-    /// Merge one entity into another, transferring all relations and chunk links
-    /// The source entity is deleted after merging
+    /// Merge `source` into `target` as a retractable `same_as` assertion.
+    /// Nothing is rewritten or deleted; reads resolve through
+    /// [`Database::resolve_entity`], and retracting the assertion un-merges.
     pub fn merge_entities(&self, target_id: i64, source_id: i64) -> Result<(), GraphRagError> {
-        // Get source entity name for audit
-        let source_name: String = self.conn.query_row(
-            "SELECT name FROM entities WHERE id = ?1",
-            params![source_id],
-            |row| row.get(0),
-        )?;
-
-        // Update relations: change source_id to target_id in both head and tail
-        self.conn.execute(
-            "UPDATE relations SET head_id = ?1 WHERE head_id = ?2",
-            params![target_id, source_id],
-        )?;
-        self.conn.execute(
-            "UPDATE relations SET tail_id = ?1 WHERE tail_id = ?2",
-            params![target_id, source_id],
-        )?;
-
-        // Update chunk_entities links
-        // First, delete links that would become duplicates
-        self.conn.execute(
-            "DELETE FROM chunk_entities
-             WHERE entity_id = ?1
-             AND chunk_id IN (SELECT chunk_id FROM chunk_entities WHERE entity_id = ?2)",
-            params![source_id, target_id],
-        )?;
-        // Then update remaining links
-        self.conn.execute(
-            "UPDATE chunk_entities SET entity_id = ?1 WHERE entity_id = ?2",
-            params![target_id, source_id],
-        )?;
-
-        // Preserve exact extraction involvement across entity resolution.
-        self.conn.execute(
-            "DELETE FROM extraction_entities
-             WHERE entity_id = ?1
-             AND provenance_nonce IN (
-                 SELECT provenance_nonce FROM extraction_entities WHERE entity_id = ?2
-             )",
-            params![source_id, target_id],
-        )?;
-        self.conn.execute(
-            "UPDATE extraction_entities SET entity_id = ?1 WHERE entity_id = ?2",
-            params![target_id, source_id],
-        )?;
-
-        // Update community membership
-        self.conn.execute(
-            "DELETE FROM entity_communities
-             WHERE entity_id = ?1
-             AND community_id IN (SELECT community_id FROM entity_communities WHERE entity_id = ?2)",
-            params![source_id, target_id],
-        )?;
-        self.conn.execute(
-            "UPDATE entity_communities SET entity_id = ?1 WHERE entity_id = ?2",
-            params![target_id, source_id],
-        )?;
-
-        // Record the merge for audit
-        self.conn.execute(
-            "INSERT INTO entity_merges (target_entity_id, merged_entity_name) VALUES (?1, ?2)",
-            params![target_id, source_name],
-        )?;
-
-        // Delete source entity (cascades to embedding)
-        self.conn
-            .execute("DELETE FROM entities WHERE id = ?1", params![source_id])?;
-
+        let by = crate::assertions::Asserter::new("agent:merge")?;
+        self.merge_as_same(source_id, target_id, &by)?;
         Ok(())
     }
 
-    /// Get merge history for an entity (what was merged into it)
+    /// Get merge history for an entity (what was merged into it): legacy
+    /// rewrite merges plus active `same_as` assertions.
     pub fn get_entity_merge_history(
         &self,
         entity_id: i64,
     ) -> Result<Vec<(String, String)>, GraphRagError> {
         let mut stmt = self.conn.prepare(
-            "SELECT merged_entity_name, merged_at FROM entity_merges WHERE target_entity_id = ?1 ORDER BY merged_at",
+            "SELECT merged_entity_name, merged_at FROM entity_merges WHERE target_entity_id = ?1
+             UNION ALL
+             SELECT e.name, a.asserted_at FROM assertions a JOIN entities e ON e.id = a.head_id
+             WHERE a.tail_id = ?1 AND a.relation = 'same_as' AND a.retracted_at IS NULL
+             ORDER BY 2",
         )?;
 
         let history = stmt

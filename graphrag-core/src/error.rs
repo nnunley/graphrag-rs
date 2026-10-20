@@ -32,6 +32,9 @@ pub enum GraphRagError {
     #[error("Embedding error: {0}")]
     Embedding(String),
 
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
+
     #[error("{0}")]
     Other(String),
 }

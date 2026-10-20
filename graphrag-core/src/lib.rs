@@ -48,6 +48,7 @@
 //! # }
 //! ```
 
+pub mod assertions;
 pub mod capsule;
 pub mod capsule_store;
 pub mod db;
@@ -58,6 +59,7 @@ pub mod fingerprints;
 pub mod leiden;
 pub mod lexical;
 pub mod mr;
+pub mod nodes;
 pub mod paper;
 pub mod query;
 pub(crate) mod schema_v2;

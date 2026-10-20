@@ -95,7 +95,8 @@ CREATE TABLE IF NOT EXISTS assertions (
     reason TEXT,
     context TEXT,
     asserted_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-    retracted_at TEXT
+    retracted_at TEXT,
+    retracted_by TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_assertions_head ON assertions(head_id);
 CREATE INDEX IF NOT EXISTS idx_assertions_tail ON assertions(tail_id);
