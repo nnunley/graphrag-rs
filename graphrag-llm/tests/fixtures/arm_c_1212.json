@@ -1,0 +1,26 @@
+{
+  "entities": [
+    {"name": "Global approaches", "type": "Concept", "description": "A category of methods that significantly outperformed conventional vector RAG in both comprehensiveness and diversity criteria across datasets."},
+    {"name": "Vector RAG", "type": "Concept", "description": "A retrieval-augmented generation method that produced the most direct responses across all comparisons."},
+    {"name": "SS", "type": "Concept", "description": "A variant referenced in comparisons with global approaches and GraphRAG."},
+    {"name": "GraphRAG", "type": "Concept", "description": "A method that showed scalability advantages compared to source text summarization, requiring fewer context tokens."},
+    {"name": "TS", "type": "Concept", "description": "Source text summarization, referenced in comparisons with GraphRAG approaches."},
+    {"name": "LLM", "type": "Concept", "description": "Large language model, used to analyze LLM reasoning for the empowerment measure."},
+    {"name": "Podcast transcripts", "type": "Concept", "description": "A dataset used in the study, with intermediate-level summaries achieving specific win rates."},
+    {"name": "News articles", "type": "Concept", "description": "A dataset used in the study, with low-level community summaries achieving specific win rates."},
+    {"name": "Community summaries", "type": "Concept", "description": "Summaries that generally provided a small but consistent improvement in answer comprehensiveness and diversity compared to source texts."},
+    {"name": "Source texts", "type": "Concept", "description": "Referenced in comparisons with community summaries and GraphRAG."},
+    {"name": "C3", "type": "Concept", "description": "Low-level community summaries, for which GraphRAG required 26-33% fewer context tokens."},
+    {"name": "C0", "type": "Concept", "description": "Root-level community summaries, for which GraphRAG required over 97% fewer tokens."},
+    {"name": "Experiment 2", "type": "Event", "description": "An experiment whose results are shown in Table 3 regarding the average number of extracted claims."}
+  ],
+  "relationships": [
+    {"source": "Global approaches", "target": "Vector RAG", "relation": "outperformed", "description": "Global approaches significantly outperformed conventional vector RAG in both comprehensiveness and diversity criteria across datasets.", "strength": 9},
+    {"source": "GraphRAG", "target": "TS", "relation": "compared_to", "description": "GraphRAG approaches were compared to source text summarization (TS) in empowerment comparisons.", "strength": 8},
+    {"source": "LLM", "target": "Empowerment", "relation": "used_to_analyze", "description": "Using an LLM to analyze LLM reasoning indicated that the ability to provide specific examples, quotes, and citations was key.", "strength": 7},
+    {"source": "Community summaries", "target": "Source texts", "relation": "compared_to", "description": "Community summaries generally provided a small but consistent improvement in answer comprehensiveness and diversity compared to source texts.", "strength": 8},
+    {"source": "GraphRAG", "target": "C3", "relation": "required_fewer_tokens_for", "description": "For low-level community summaries (C3), GraphRAG required 26-33% fewer context tokens.", "strength": 8},
+    {"source": "GraphRAG", "target": "C0", "relation": "required_fewer_tokens_for", "description": "For root-level community summaries (C0), GraphRAG required over 97% fewer tokens.", "strength": 8},
+    {"source": "Experiment 2", "target": "LLM", "relation": "measured_claims", "description": "Table 3 shows results for the average number of extracted claims (claim-based measure).", "strength": 7}
+  ]
+}

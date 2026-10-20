@@ -1348,6 +1348,7 @@ dependencies = [
 name = "graphrag-llm"
 version = "0.1.0"
 dependencies = [
+ "graphrag-core",
  "serde",
  "serde_json",
  "ureq",

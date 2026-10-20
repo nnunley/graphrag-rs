@@ -5,6 +5,7 @@
 //! server directly.
 
 pub mod openai;
+pub mod paper_json;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
