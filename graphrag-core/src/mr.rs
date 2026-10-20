@@ -310,13 +310,14 @@ fn tx_get_or_create_entity(
     name: &str,
     entity_type: Option<&str>,
 ) -> Result<i64, GraphRagError> {
-    let name = name.trim();
+    let display = crate::synonyms::display_name(name);
+    let key = crate::synonyms::normalize_entity_name(name);
     let existing = tx
         .query_row(
             "SELECT id FROM entities
-             WHERE store = ?1 AND LOWER(TRIM(name)) = LOWER(TRIM(?2))
+             WHERE store = ?1 AND kind = 'entity' AND name_key = ?2
              ORDER BY id LIMIT 1",
-            params![store, name],
+            params![store, key],
             |row| row.get::<_, i64>(0),
         )
         .optional()?;
@@ -330,9 +331,9 @@ fn tx_get_or_create_entity(
         return Ok(id);
     }
     tx.execute(
-        "INSERT INTO entities (store, name, entity_type, properties)
-         VALUES (?1, ?2, ?3, NULL)",
-        params![store, name, entity_type],
+        "INSERT INTO entities (store, name, entity_type, properties, name_key)
+         VALUES (?1, ?2, ?3, NULL, ?4)",
+        params![store, display, entity_type, key],
     )?;
     Ok(tx.last_insert_rowid())
 }

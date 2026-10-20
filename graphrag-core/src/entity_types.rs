@@ -22,7 +22,6 @@ pub const STANDARD_TYPE_SYNONYMS: &[(&str, &str)] = &[
     ("institution", "organization"),
     ("university", "organization"),
     ("team", "organization"),
-    ("group", "organization"),
     ("consortium", "organization"),
     // Place (Schema.org)
     ("location", "place"),
@@ -59,7 +58,6 @@ pub const STANDARD_TYPE_SYNONYMS: &[(&str, &str)] = &[
     ("data", "dataset"),
     ("corpus", "dataset"),
     ("benchmark", "dataset"),
-    ("collection", "dataset"),
     // Code entities
     ("class", "code_entity"),
     ("function", "code_entity"),
@@ -127,6 +125,14 @@ pub const CANONICAL_ENTITY_TYPES: &[&str] = &[
     "project",
     "version",
     "resource",
+    // A named grouping of documents (papers, conversations, ...).
+    "group",
+    // A heading-delimited part of a document.
+    "section",
+    // A concept class whose instances share a nature (the Cyc sense).
+    "collection",
+    // Fallback when an extracted type maps to nothing.
+    "other",
 ];
 
 /// Get all canonical entity types

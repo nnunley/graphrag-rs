@@ -237,6 +237,7 @@ const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
         "edge_status",
         "TEXT NOT NULL DEFAULT 'active' CHECK(edge_status IN ('active','dormant','implied'))",
     ),
+    ("entities", "name_key", "TEXT"),
     ("relations", "salience", "REAL"),
     (
         "relations",
@@ -276,6 +277,10 @@ pub(crate) fn apply_v2(conn: &Connection) -> Result<(), GraphRagError> {
             conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"))?;
         }
     }
+    conn.execute_batch(
+        "UPDATE entities SET name_key = lower(trim(name)) WHERE name_key IS NULL;
+         CREATE INDEX IF NOT EXISTS idx_entities_name_key ON entities(store, name_key);",
+    )?;
     conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
     Ok(())
 }

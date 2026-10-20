@@ -656,34 +656,32 @@ impl Database {
         entity_type: Option<&str>,
         properties: Option<&str>,
     ) -> Result<i64, GraphRagError> {
-        let name = name.trim();
-        // Try to get existing (folded match)
+        let display = crate::synonyms::display_name(name);
+        let key = crate::synonyms::normalize_entity_name(name);
         let existing: Option<i64> = self
             .conn
             .query_row(
                 "SELECT id FROM entities
-                 WHERE store = ?1 AND kind = 'entity' AND LOWER(TRIM(name)) = LOWER(TRIM(?2))
+                 WHERE store = ?1 AND kind = 'entity' AND name_key = ?2
                  ORDER BY id LIMIT 1",
-                params![store, name],
+                params![store, key],
                 |row| row.get(0),
             )
-            .ok();
+            .optional()?;
 
         if let Some(id) = existing {
-            // Update type/properties if provided
             if entity_type.is_some() || properties.is_some() {
                 self.conn.execute(
-                    "UPDATE entities SET entity_type = COALESCE(?3, entity_type), properties = COALESCE(?4, properties) WHERE id = ?1",
-                    params![id, store, entity_type, properties],
+                    "UPDATE entities SET entity_type = COALESCE(?2, entity_type), properties = COALESCE(?3, properties) WHERE id = ?1",
+                    params![id, entity_type, properties],
                 )?;
             }
             return Ok(id);
         }
 
-        // Create new
         self.conn.execute(
-            "INSERT INTO entities (store, name, entity_type, properties) VALUES (?1, ?2, ?3, ?4)",
-            params![store, name, entity_type, properties],
+            "INSERT INTO entities (store, name, entity_type, properties, name_key) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![store, display, entity_type, properties, key],
         )?;
 
         Ok(self.conn.last_insert_rowid())

@@ -52,8 +52,14 @@ impl Database {
     ) -> Result<i64, GraphRagError> {
         let entity_type = (kind != NodeKind::Entity).then_some(kind.as_str());
         self.conn().execute(
-            "INSERT INTO entities (store, name, entity_type, kind) VALUES (?1, ?2, ?3, ?4)",
-            params![store, name, entity_type, kind.as_str()],
+            "INSERT INTO entities (store, name, entity_type, kind, name_key) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                store,
+                name,
+                entity_type,
+                kind.as_str(),
+                crate::synonyms::normalize_entity_name(name)
+            ],
         )?;
         Ok(self.conn().last_insert_rowid())
     }

@@ -80,10 +80,17 @@ pub const STANDARD_SYNONYMS: &[(&str, &str)] = &[
     ("related_to", "associated_with"),
     ("connected_to", "associated_with"),
     ("linked_to", "associated_with"),
-    // Type/classification -> "type_of" / "has_type"
-    ("is_a", "type_of"),
-    ("instance_of", "type_of"),
-    ("kind_of", "type_of"),
+    // Classification (Cyc): an individual is an instance of a collection
+    // ("isa"); one collection specializes another ("genls").
+    ("is_a", "isa"),
+    ("instance_of", "isa"),
+    ("type_of", "isa"),
+    ("kind_of", "genls"),
+    ("subclass_of", "genls"),
+    ("subtype_of", "genls"),
+    // Aboutness (Dublin Core subject)
+    ("about", "subject"),
+    ("topic_of", "subject"),
     // Result/causation -> "produces" / "produced_by"
     ("results_in", "produces"),
     ("yields", "produces"),
@@ -93,12 +100,83 @@ pub const STANDARD_SYNONYMS: &[(&str, &str)] = &[
     ("generated_by", "produced_by"),
 ];
 
-/// Get all canonical relation types (unique values from STANDARD_SYNONYMS)
+/// Canonical relations with no synonyms. `disjoint_with`, `links_to` and
+/// `same_as` are reserved: recognized now, enforced later.
+pub const EXTRA_CANONICAL_RELATIONS: &[&str] = &[
+    "subject",
+    "isa",
+    "genls",
+    "disjoint_with",
+    "links_to",
+    "same_as",
+    "mentions",
+];
+
+/// Get all canonical relation types (synonym targets plus the extras)
 pub fn canonical_relations() -> Vec<&'static str> {
-    let mut canonicals: Vec<&str> = STANDARD_SYNONYMS.iter().map(|(_, c)| *c).collect();
+    let mut canonicals: Vec<&str> = STANDARD_SYNONYMS
+        .iter()
+        .map(|(_, c)| *c)
+        .chain(EXTRA_CANONICAL_RELATIONS.iter().copied())
+        .collect();
     canonicals.sort();
     canonicals.dedup();
     canonicals
+}
+
+/// How a raw relation name from an extractor maps to the vocabulary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RelationMapping {
+    Canonical(&'static str),
+    /// Kept under its normalized raw name and counted, so the vocabulary
+    /// can grow from evidence.
+    Unmapped(String),
+}
+
+fn snake(raw: &str) -> String {
+    raw.trim()
+        .to_lowercase()
+        .split(|c: char| c.is_whitespace() || c == '-')
+        .filter(|p| !p.is_empty())
+        .collect::<Vec<_>>()
+        .join("_")
+}
+
+/// Lowercase, spaces and hyphens to `_`, then synonym lookup. Canonical
+/// names map to themselves.
+pub fn normalize_relation(raw: &str) -> RelationMapping {
+    let key = snake(raw);
+    if let Some(c) = canonical_relations().into_iter().find(|c| *c == key) {
+        return RelationMapping::Canonical(c);
+    }
+    match STANDARD_SYNONYMS.iter().find(|(s, _)| *s == key) {
+        Some((_, c)) => RelationMapping::Canonical(c),
+        None => RelationMapping::Unmapped(key),
+    }
+}
+
+/// Canonical entity type for a raw type; `"other"` when nothing matches.
+pub fn normalize_entity_type(raw: &str) -> &'static str {
+    let key = snake(raw);
+    let types = crate::entity_types::CANONICAL_ENTITY_TYPES;
+    if let Some(t) = types.iter().find(|t| **t == key) {
+        return t;
+    }
+    crate::entity_types::STANDARD_TYPE_SYNONYMS
+        .iter()
+        .find(|(s, _)| *s == key)
+        .map_or("other", |(_, c)| c)
+}
+
+/// The match key for an entity name: trimmed, internal whitespace
+/// collapsed, case-folded. The display form is kept separately.
+pub fn normalize_entity_name(raw: &str) -> String {
+    display_name(raw).to_lowercase()
+}
+
+/// Trimmed with internal whitespace collapsed; case kept.
+pub fn display_name(raw: &str) -> String {
+    raw.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Load standard synonyms into a database
