@@ -26,7 +26,7 @@ impl PluginCommand for GraphRagCreate {
                 "Embedding dimension (default: 1536 for OpenAI)",
                 Some('d'),
             )
-            .input_output_types(vec![(Type::Nothing, Type::Record(Box::new([])))])
+            .input_output_types(vec![(Type::Nothing, Type::record())])
             .category(Category::Database)
     }
 

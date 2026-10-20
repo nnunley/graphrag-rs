@@ -14,7 +14,7 @@ impl PluginCommand for GraphRagList {
     }
 
     fn description(&self) -> &str {
-        "List all GraphRAG stores"
+        "List the groups in memory, with document counts"
     }
 
     fn signature(&self) -> Signature {
@@ -34,23 +34,16 @@ impl PluginCommand for GraphRagList {
 
         let db = Database::open(&plugin.db_path).map_err(|e| e.into_labeled_error(span))?;
 
-        let stores = db.list_stores().map_err(|e| e.into_labeled_error(span))?;
-
-        let values: Vec<Value> = stores
+        let groups = db
+            .list_groups("memory")
+            .map_err(|e| e.into_labeled_error(span))?;
+        let values: Vec<Value> = groups
             .into_iter()
-            .map(|store| {
-                // Get stats for each store
-                let (chunks, entities, relations) =
-                    db.store_stats(&store.name).unwrap_or((0, 0, 0));
-
+            .map(|(name, documents)| {
                 Value::record(
                     nu_protocol::record! {
-                        "name" => Value::string(store.name, span),
-                        "dim" => Value::int(store.dim as i64, span),
-                        "chunks" => Value::int(chunks, span),
-                        "entities" => Value::int(entities, span),
-                        "relations" => Value::int(relations, span),
-                        "created_at" => Value::string(store.created_at, span),
+                        "group" => Value::string(name, span),
+                        "documents" => Value::int(documents as i64, span),
                     },
                     span,
                 )

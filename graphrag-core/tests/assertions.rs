@@ -222,3 +222,26 @@ fn merge_entities_is_a_same_as_wrapper() {
         "merge no longer deletes the source"
     );
 }
+
+#[test]
+fn list_groups_counts_documents() {
+    let (_d, db) = db();
+    let a = db
+        .create_node("memory", NodeKind::Document, "doc:a")
+        .unwrap();
+    let b = db
+        .create_node("memory", NodeKind::Document, "doc:b")
+        .unwrap();
+    let papers = db.get_or_create_group("memory", "papers").unwrap();
+    let notes = db.get_or_create_group("memory", "notes").unwrap();
+    for d in [a, b] {
+        db.assert_edge(d, "part_of", papers, &by("agent:cli"), None, None)
+            .unwrap();
+    }
+    db.assert_edge(a, "part_of", notes, &by("agent:cli"), None, None)
+        .unwrap();
+    assert_eq!(
+        db.list_groups("memory").unwrap(),
+        vec![("notes".to_string(), 1), ("papers".to_string(), 2)]
+    );
+}

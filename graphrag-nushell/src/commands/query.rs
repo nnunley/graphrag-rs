@@ -39,7 +39,7 @@ impl PluginCommand for GraphRagQuery {
                 "Graph expansion depth (default: 1)",
                 Some('e'),
             )
-            .input_output_types(vec![(Type::Nothing, Type::Record(Box::new([])))])
+            .input_output_types(vec![(Type::Nothing, Type::record())])
             .category(Category::Database)
     }
 

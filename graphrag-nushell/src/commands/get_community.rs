@@ -21,7 +21,7 @@ impl PluginCommand for GraphRagGetCommunity {
         Signature::build("graphrag get-community")
             .required("store", SyntaxShape::String, "Name of the store")
             .required("community_id", SyntaxShape::Int, "Community ID")
-            .input_output_types(vec![(Type::Nothing, Type::Record(Box::new([])))])
+            .input_output_types(vec![(Type::Nothing, Type::record())])
             .category(Category::Database)
     }
 
@@ -113,7 +113,7 @@ impl PluginCommand for GraphRagUpdateSummary {
         Signature::build("graphrag update-summary")
             .required("community_id", SyntaxShape::Int, "Community ID")
             .required("summary", SyntaxShape::String, "Summary text")
-            .input_output_types(vec![(Type::Nothing, Type::Record(Box::new([])))])
+            .input_output_types(vec![(Type::Nothing, Type::record())])
             .category(Category::Database)
     }
 

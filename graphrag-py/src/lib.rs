@@ -14,9 +14,7 @@ use graphrag_core::mr::{
     ExtractPrompt, ExtractResult, ExtractionStrategy, SummaryResult, apply_extract,
     apply_summarize, plan_extract, plan_summarize,
 };
-use graphrag_core::{
-    BruteForceVectorSource, Database, Embedder, LexicalIndex, VectorCandidateSource,
-};
+use graphrag_core::{Database, Embedder};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -76,6 +74,10 @@ pub struct Hit {
     pub rrf: f64,
     pub similarity: Option<f32>,
     pub lexical: Option<f32>,
+    /// Expansion-lane score, when reached through shared entities.
+    pub graph: Option<f64>,
+    pub groups: Vec<String>,
+    pub heading_path: Vec<String>,
 }
 
 #[pymethods]
@@ -109,7 +111,7 @@ pub struct Store {
 impl Store {
     /// Open (or create) the database under `data_dir`.
     #[new]
-    #[pyo3(signature = (data_dir, store = "conversations"))]
+    #[pyo3(signature = (data_dir, store = "memory"))]
     fn new(data_dir: &str, store: &str) -> PyResult<Self> {
         let dir = std::path::PathBuf::from(shellexpand(data_dir));
         std::fs::create_dir_all(&dir).map_err(err)?;
@@ -154,9 +156,10 @@ impl Store {
         Ok(d)
     }
 
-    /// Hybrid search: exact cosine + BM25, fused with RRF.
-    #[pyo3(signature = (query, top = 5))]
-    fn search(&self, query: &str, top: usize) -> PyResult<Vec<Hit>> {
+    /// Hybrid search: exact cosine + BM25 + graph expansion, fused with
+    /// RRF. `groups` restricts results to those groups (and subgroups).
+    #[pyo3(signature = (query, top = 5, groups = Vec::new()))]
+    fn search(&self, query: &str, top: usize, groups: Vec<String>) -> PyResult<Vec<Hit>> {
         let db = self.db.lock().map_err(|e| err(e.to_string()))?;
         let rec = db.get_store(&self.name).map_err(err)?;
         let embedder = Embedder::new(Default::default()).map_err(err)?;
@@ -168,46 +171,95 @@ impl Store {
                 rec.dim
             )));
         }
-        let k = top.max(5) * 4;
-        let vsrc = BruteForceVectorSource::for_store(&db, &self.name).map_err(err)?;
-        let vhits = vsrc.top_candidates(&embedding, k).map_err(err)?;
-        let chunks = db.list_chunks(&self.name).map_err(err)?;
-        let lhits = match LexicalIndex::build_from_chunks(&chunks).map_err(err)? {
-            Some(ix) => ix.search(query, k).map_err(err)?,
-            None => Vec::new(),
-        };
+        let groups: Vec<&str> = groups.iter().map(String::as_str).collect();
+        let now = db.now_utc().map_err(err)?;
+        let hits = db
+            .hybrid_recall(&self.name, query, &embedding, &groups, top, None, &now)
+            .map_err(err)?;
+        Ok(hits
+            .into_iter()
+            .map(|h| Hit {
+                chunk_id: h.chunk_id,
+                text: h.content,
+                source: h.source,
+                rrf: h.rrf,
+                similarity: h.vec,
+                lexical: h.lex,
+                graph: h.graph,
+                groups: h.groups,
+                heading_path: h.heading_path,
+            })
+            .collect())
+    }
 
-        use graphrag_core::leit_fusion::{RankedResult, fuse_default};
-        let vr: Vec<RankedResult> = vhits
-            .iter()
-            .enumerate()
-            .map(|(i, h)| RankedResult::new(h.chunk_id.to_string(), i + 1))
-            .collect();
-        let lr: Vec<RankedResult> = lhits
-            .iter()
-            .enumerate()
-            .map(|(i, (id, _))| RankedResult::new(id.to_string(), i + 1))
-            .collect();
-
-        let mut out = Vec::new();
-        for f in fuse_default(&[vr, lr]).into_iter().take(top) {
-            let id: i64 = match f.id.parse() {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            let Some(c) = chunks.iter().find(|c| c.id == id) else {
-                continue;
-            };
-            out.push(Hit {
-                chunk_id: id,
-                text: c.content.clone(),
-                source: c.source.clone(),
-                rrf: f.score,
-                similarity: vhits.iter().find(|h| h.chunk_id == id).map(|h| h.score),
-                lexical: lhits.iter().find(|(lid, _)| *lid == id).map(|(_, s)| *s),
-            });
+    /// Add a document (content-addressed; chunked by sections). Returns the
+    /// document id. The background worker (launchd backstop) embeds and
+    /// extracts it; Python doesn't start a worker.
+    #[pyo3(signature = (content, groups = vec!["conversations".to_string()], source = None, doc_key = None))]
+    fn add_document(
+        &self,
+        content: &str,
+        groups: Vec<String>,
+        source: Option<&str>,
+        doc_key: Option<&str>,
+    ) -> PyResult<i64> {
+        use graphrag_core::documents::{AddDocument, AddOutcome, Origin};
+        let db = self.db.lock().map_err(|e| err(e.to_string()))?;
+        if db.get_store(&self.name).is_err() {
+            db.create_store(&self.name, 768).map_err(err)?;
         }
-        Ok(out)
+        let groups: Vec<&str> = groups.iter().map(String::as_str).collect();
+        let out = db
+            .add_document(&AddDocument {
+                store: &self.name,
+                content,
+                origin: Origin::Source,
+                source,
+                doc_key,
+                title: None,
+                groups: &groups,
+                surface: "python",
+                profile: &graphrag_core::fingerprints::ChunkerProfile::default_markdown(),
+            })
+            .map_err(err)?;
+        Ok(match out {
+            AddOutcome::Created { document_id }
+            | AddOutcome::Existing { document_id, .. }
+            | AddOutcome::Replaced { document_id, .. } => document_id,
+        })
+    }
+
+    /// The ingestion status report as a JSON string.
+    fn status_report(&self) -> PyResult<String> {
+        let db = self.db.lock().map_err(|e| err(e.to_string()))?;
+        let model = graphrag_core::EmbedderModel::NomicEmbedText;
+        let sc = graphrag_core::status::StaticConfig {
+            store: self.name.clone(),
+            embedder_id: graphrag_core::embedder_model_id(model),
+            dim: model.dimension(),
+            chunker: graphrag_core::fingerprints::ChunkerProfile::default_markdown(),
+            extraction: graphrag_core::fingerprints::ExtractionConfig {
+                model: std::env::var("GRAPHRAG_LLM_MODEL").unwrap_or_else(|_| "qwen3.8-27b".into()),
+                profile: graphrag_llm::paper_json::PROFILE.into(),
+                prompt_version: graphrag_llm::paper_json::PROMPT_VERSION.into(),
+                schema_version: graphrag_llm::paper_json::SCHEMA_VERSION.into(),
+                glean_max_rounds: 0,
+            },
+            community: Default::default(),
+            lift: Default::default(),
+        };
+        let report = db.status_report(&sc).map_err(err)?;
+        serde_json::to_string(&report).map_err(err)
+    }
+
+    /// Build (or reuse) the fingerprinted community run. Returns
+    /// `(run_id, reused, communities, levels)`.
+    fn build_community_run(&self) -> PyResult<(i64, bool, usize, i32)> {
+        let db = self.db.lock().map_err(|e| err(e.to_string()))?;
+        let r = db
+            .build_community_run(&self.name, &Default::default())
+            .map_err(err)?;
+        Ok((r.run_id, r.reused, r.communities, r.levels))
     }
 
     /// Pending map-reduce units for `stage` ("extract" | "summarize").

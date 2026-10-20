@@ -1,11 +1,14 @@
 use crate::GraphRagPlugin;
 use crate::error_ext::GraphRagErrorExt;
-use graphrag_core::{
-    Database, EntityInput, ExtractResult, GraphRagError, apply_extracted_entities,
-    extraction_provenance_nonce,
-};
+use graphrag_core::assertions::Asserter;
+use graphrag_core::documents::{AddDocument, AddOutcome, Origin};
+use graphrag_core::fingerprints::ChunkerProfile;
+use graphrag_core::{Database, GraphRagError};
 use nu_plugin::{EngineInterface, EvaluatedCall, PluginCommand};
 use nu_protocol::{Category, PipelineData, Record, Signature, SyntaxShape, Type, Value};
+
+/// Everything is added to the one memory store; groups scope it.
+const MEMORY_STORE: &str = "memory";
 
 pub struct GraphRagAdd;
 
@@ -17,17 +20,21 @@ impl PluginCommand for GraphRagAdd {
     }
 
     fn description(&self) -> &str {
-        "Add content to a GraphRAG store. Accepts a record with: content, embedding, entities (optional), source (optional)"
+        "Add content to memory. Accepts a record with: content, embedding (optional), groups (optional list), source, doc_key, entities (optional asserted triples). The background worker embeds and extracts."
     }
 
     fn signature(&self) -> Signature {
         Signature::build("graphrag add")
-            .required("store", SyntaxShape::String, "Name of the store")
+            .required(
+                "group",
+                SyntaxShape::String,
+                "Group to add to (formerly the store name)",
+            )
             .input_output_types(vec![
-                (Type::Record(Box::new([])), Type::Record(Box::new([]))),
+                (Type::record(), Type::record()),
                 (
-                    Type::List(Box::new(Type::Record(Box::new([])))),
-                    Type::List(Box::new(Type::Record(Box::new([])))),
+                    Type::List(Box::new(Type::record())),
+                    Type::List(Box::new(Type::record())),
                 ),
             ])
             .category(Category::Database)
@@ -40,174 +47,124 @@ impl PluginCommand for GraphRagAdd {
         call: &EvaluatedCall,
         input: PipelineData,
     ) -> Result<PipelineData, nu_protocol::LabeledError> {
-        let store_name: String = call.req(0)?;
+        let group: String = call.req(0)?;
         let span = call.head;
-
         let db = Database::open(&plugin.db_path).map_err(|e| e.into_labeled_error(span))?;
 
-        // Verify store exists and get dimension
-        let store = db
-            .get_store(&store_name)
-            .map_err(|e| e.into_labeled_error(span))?;
-
-        // Process input
-        let result = match input {
-            PipelineData::Value(Value::Record { val, .. }, _) => {
-                let (chunk_id, provenance_nonce) =
-                    process_record(&db, &store_name, store.dim, &val, span)
-                        .map_err(|e| e.into_labeled_error(span))?;
-                add_result_value(&store_name, chunk_id, provenance_nonce, span)
-            }
-            PipelineData::Value(Value::List { vals, .. }, _) => {
-                let mut results = Vec::new();
-                for val in vals {
-                    if let Value::Record { val: record, .. } = val {
-                        let (chunk_id, provenance_nonce) =
-                            process_record(&db, &store_name, store.dim, &record, span)
-                                .map_err(|e| e.into_labeled_error(span))?;
-                        results.push(add_result_value(
-                            &store_name,
-                            chunk_id,
-                            provenance_nonce,
-                            span,
-                        ));
-                    }
-                }
-                Value::list(results, span)
-            }
+        let records: Vec<Record> = match input {
+            PipelineData::Value(Value::Record { val, .. }, _) => vec![val.into_owned()],
+            PipelineData::Value(Value::List { vals, .. }, _) => vals
+                .into_iter()
+                .filter_map(|v| match v {
+                    Value::Record { val, .. } => Some(val.into_owned()),
+                    _ => None,
+                })
+                .collect(),
             _ => {
                 return Err(GraphRagError::Other(
-                    "Expected record or list of records with: content, embedding, entities (optional), source (optional)".to_string()
-                ).into_labeled_error(span));
+                    "Expected record or list of records with: content, embedding (optional), groups (optional), source (optional)".to_string(),
+                )
+                .into_labeled_error(span));
             }
         };
-
-        Ok(PipelineData::Value(result, None))
+        let mut results = Vec::new();
+        for record in &records {
+            let (document_id, chunks) =
+                process_record(&db, &group, record).map_err(|e| e.into_labeled_error(span))?;
+            let mut out = Record::new();
+            out.push("document_id", Value::int(document_id, span));
+            out.push("chunks", Value::int(chunks as i64, span));
+            out.push("group", Value::string(&group, span));
+            results.push(Value::record(out, span));
+        }
+        let value = if results.len() == 1 {
+            results.remove(0)
+        } else {
+            Value::list(results, span)
+        };
+        Ok(PipelineData::Value(value, None))
     }
 }
 
-fn add_result_value(
-    store_name: &str,
-    chunk_id: i64,
-    provenance_nonce: Option<String>,
-    span: nu_protocol::Span,
-) -> Value {
-    let mut record = Record::new();
-    record.push("chunk_id", Value::int(chunk_id, span));
-    record.push("store", Value::string(store_name, span));
-    if let Some(nonce) = provenance_nonce {
-        record.push("provenance_nonce", Value::string(nonce, span));
-    }
-    Value::record(record, span)
+fn str_field<'a>(record: &'a Record, key: &str) -> Option<&'a str> {
+    record.get(key).and_then(|v| v.as_str().ok())
 }
 
 fn process_record(
     db: &Database,
-    store_name: &str,
-    expected_dim: usize,
+    group: &str,
     record: &Record,
-    _span: nu_protocol::Span,
-) -> Result<(i64, Option<String>), GraphRagError> {
-    // Extract content (required)
-    let content = record
-        .get("content")
-        .and_then(|v| v.as_str().ok())
+) -> Result<(i64, usize), GraphRagError> {
+    let content = str_field(record, "content")
         .ok_or_else(|| GraphRagError::MissingField("content".to_string()))?;
-
-    // Extract embedding (required)
-    let embedding: Vec<f32> = record
-        .get("embedding")
-        .and_then(|v| {
-            if let Value::List { vals, .. } = v {
-                Some(
-                    vals.iter()
-                        .filter_map(|v| v.as_float().ok().map(|f| f as f32))
-                        .collect(),
-                )
-            } else {
-                None
-            }
-        })
-        .ok_or_else(|| GraphRagError::MissingField("embedding".to_string()))?;
-
-    // Verify dimension
-    if embedding.len() != expected_dim {
-        return Err(GraphRagError::DimensionMismatch {
-            expected: expected_dim,
-            got: embedding.len(),
-        });
-    }
-
-    // Extract optional fields
-    let source = record.get("source").and_then(|v| v.as_str().ok());
-
-    let metadata = record
-        .get("metadata")
-        .map(|v| serde_json::to_string(v).unwrap_or_default());
-
-    // Add chunk to database
-    let chunk_id = db.add_chunk(store_name, content, source, metadata.as_deref())?;
-
-    // Store the canonical embedding
-    db.set_chunk_embedding(chunk_id, &embedding)?;
-
-    // Structured entity input is an extraction result and therefore must use
-    // the same atomic checkpoint/provenance path as CLI and MCP extraction.
-    let provenance_nonce = if let Some(Value::List { vals, .. }) = record.get("entities") {
-        let triples = vals
-            .iter()
-            .filter_map(|value| match value {
-                Value::Record { val, .. } => Some(parse_entity(val)),
-                _ => None,
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let model = record
-            .get("model")
-            .and_then(|value| value.as_str().ok())
-            .unwrap_or("nushell-input");
-        let nonce = extraction_provenance_nonce(store_name, chunk_id, model, content);
-        let result = ExtractResult {
-            chunk_id,
-            model: model.into(),
-            provenance_nonce: nonce.clone(),
-            response: serde_json::to_string(&triples).unwrap_or_default(),
-        };
-        apply_extracted_entities(db, store_name, &result, &triples)?;
-        Some(nonce)
-    } else {
-        None
+    let embedding: Option<Vec<f32>> = match record.get("embedding") {
+        Some(Value::List { vals, .. }) => Some(
+            vals.iter()
+                .filter_map(|v| v.as_float().ok().map(|f| f as f32))
+                .collect(),
+        ),
+        _ => None,
     };
+    let mut groups: Vec<String> = match record.get("groups") {
+        Some(Value::List { vals, .. }) => vals
+            .iter()
+            .filter_map(|v| v.as_str().ok().map(String::from))
+            .collect(),
+        _ => Vec::new(),
+    };
+    groups.insert(0, group.to_string());
+    let groups: Vec<&str> = groups.iter().map(String::as_str).collect();
 
-    Ok((chunk_id, provenance_nonce))
-}
-
-fn parse_entity(record: &Record) -> Result<EntityInput, GraphRagError> {
-    let head = record
-        .get("head")
-        .and_then(|value| value.as_str().ok())
-        .ok_or_else(|| GraphRagError::MissingField("head".to_string()))?;
-    let relation = record
-        .get("relation")
-        .and_then(|value| value.as_str().ok())
-        .ok_or_else(|| GraphRagError::MissingField("relation".to_string()))?;
-    let tail = record
-        .get("tail")
-        .and_then(|value| value.as_str().ok())
-        .ok_or_else(|| GraphRagError::MissingField("tail".to_string()))?;
-    Ok(EntityInput {
-        head: head.into(),
-        head_type: record
-            .get("head_type")
-            .and_then(|value| value.as_str().ok())
-            .map(str::to_owned),
-        relation: relation.into(),
-        tail: tail.into(),
-        tail_type: record
-            .get("tail_type")
-            .and_then(|value| value.as_str().ok())
-            .map(str::to_owned),
-        properties: record
-            .get("properties")
-            .and_then(|value| serde_json::to_value(value).ok()),
-    })
+    if db.get_store(MEMORY_STORE).is_err() {
+        let dim = embedding.as_ref().map_or(768, Vec::len);
+        db.create_store(MEMORY_STORE, dim)?;
+    }
+    let outcome = db.add_document(&AddDocument {
+        store: MEMORY_STORE,
+        content,
+        origin: Origin::Source,
+        source: str_field(record, "source"),
+        doc_key: str_field(record, "doc_key"),
+        title: str_field(record, "title"),
+        groups: &groups,
+        surface: "nushell",
+        profile: &ChunkerProfile::default_markdown(),
+    })?;
+    let document_id = match outcome {
+        AddOutcome::Created { document_id }
+        | AddOutcome::Existing { document_id, .. }
+        | AddOutcome::Replaced { document_id, .. } => document_id,
+    };
+    let chunks = db.document_chunks(document_id)?;
+    // A caller-supplied embedding covers the whole text, so it can stand in
+    // for a single-chunk document until the worker embeds it with its own
+    // embedder (the embed step stays pending, so the worker still runs).
+    if let (Some(v), [only]) = (embedding, chunks.as_slice()) {
+        db.set_chunk_embedding(*only, &v)?;
+    }
+    // Structured triples are the caller's assertions, not an extraction
+    // attempt: re-extraction must not erase them.
+    if let Some(Value::List { vals, .. }) = record.get("entities") {
+        let by = Asserter::new("agent:nushell")?;
+        for v in vals {
+            let Value::Record { val, .. } = v else {
+                continue;
+            };
+            let (Some(head), Some(rel), Some(tail)) = (
+                str_field(val, "head"),
+                str_field(val, "relation"),
+                str_field(val, "tail"),
+            ) else {
+                return Err(GraphRagError::MissingField(
+                    "head/relation/tail".to_string(),
+                ));
+            };
+            let h =
+                db.get_or_create_entity(MEMORY_STORE, head, str_field(val, "head_type"), None)?;
+            let t =
+                db.get_or_create_entity(MEMORY_STORE, tail, str_field(val, "tail_type"), None)?;
+            db.assert_edge(h, rel, t, &by, Some("nushell add"), None)?;
+        }
+    }
+    Ok((document_id, chunks.len()))
 }

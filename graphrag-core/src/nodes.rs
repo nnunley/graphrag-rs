@@ -112,6 +112,20 @@ impl Database {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// Every group with its number of member documents (incl. subgroups).
+    pub fn list_groups(&self, store: &str) -> Result<Vec<(String, usize)>, GraphRagError> {
+        let mut stmt = self.conn().prepare(
+            "SELECT substr(name, ?2) FROM entities WHERE store = ?1 AND kind = 'group' ORDER BY name",
+        )?;
+        let names: Vec<String> = stmt
+            .query_map(params![store, GROUP_PREFIX.len() as i64 + 1], |r| r.get(0))?
+            .collect::<Result<_, _>>()?;
+        names
+            .into_iter()
+            .map(|n| Ok((n.clone(), self.members_of_group(store, &n)?.len())))
+            .collect()
+    }
+
     /// Document nodes `part_of` the group, directly or through subgroups.
     pub fn members_of_group(&self, store: &str, group: &str) -> Result<Vec<i64>, GraphRagError> {
         let mut stmt = self.conn().prepare(
