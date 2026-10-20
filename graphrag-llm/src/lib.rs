@@ -4,6 +4,8 @@
 //! prompt through sampling, while the standalone CLI can call a local Ollama
 //! server directly.
 
+pub mod openai;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
