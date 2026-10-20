@@ -72,6 +72,9 @@ pub mod embedder;
 #[cfg(feature = "chunking")]
 pub mod chunker;
 
+#[cfg(feature = "chunking")]
+pub mod chunk_plan;
+
 #[cfg(feature = "code")]
 pub mod code_chunker;
 
