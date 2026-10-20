@@ -27,13 +27,8 @@ pub struct EntityExtraction {
     pub entities: Vec<EntityTriple>,
 }
 
-/// Provider-agnostic chat prompt.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ChatPrompt {
-    pub system: String,
-    pub user: String,
-    pub max_tokens: u32,
-}
+/// Provider-agnostic chat prompt (defined in core so core can build prompts).
+pub use graphrag_core::prompt::ChatPrompt;
 
 /// Synchronous chat completion provider.
 pub trait ChatClient {

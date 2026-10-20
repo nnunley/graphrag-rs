@@ -177,6 +177,9 @@ impl ExpectedFingerprints for StaticConfig {
             (SubjectKind::Graph, Step::Generalize) => {
                 Some(db.generalize_input_fp(&self.store, &self.lift)?)
             }
+            (SubjectKind::Community, Step::Summary) => {
+                Some(db.summary_expected_fp(id, &self.extraction.model)?)
+            }
             (SubjectKind::Graph, Step::Communities) => {
                 Some(db.graph_input_fp(&self.store, &self.community)?)
             }

@@ -974,6 +974,13 @@ impl Database {
 
     /// Clear existing communities (and community runs) for a store
     pub fn clear_communities(&self, store: &str) -> Result<(), GraphRagError> {
+        // Row ids restart once the table empties, so stale per-community
+        // status must go with the rows or a new community inherits it.
+        self.conn.execute(
+            "DELETE FROM step_status WHERE subject_kind = 'community'
+               AND subject_id IN (SELECT id FROM communities WHERE store = ?1)",
+            params![store],
+        )?;
         self.conn
             .execute("DELETE FROM communities WHERE store = ?1", params![store])?;
         self.conn.execute(
