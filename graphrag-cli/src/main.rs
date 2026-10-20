@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 use graphrag_core::{
-    BruteForceVectorSource, CommunityGraph, Database, Embedder, EmbedderConfig, EmbedderModel,
-    LexicalIndex, RemoteEmbedderConfig, VectorCandidateSource, default_embedder_cache_dir,
+    BruteForceVectorSource, Database, Embedder, EmbedderConfig, EmbedderModel, LexicalIndex,
+    RemoteEmbedderConfig, VectorCandidateSource, default_embedder_cache_dir,
     load_standard_synonyms, load_standard_type_synonyms,
 };
 use graphrag_llm::{ChatClient, ChatPrompt, OllamaChatClient};
@@ -544,27 +544,18 @@ fn cmd_enrich(
         .list_relations(store)
         .map_err(|e| format!("list relations: {e}"))?;
 
-    let mut graph = CommunityGraph::new();
-    for entity in &entities {
-        graph.add_node(entity.id);
-    }
-    for relation in &relations {
-        graph.add_edge(relation.head_id, relation.tail_id, 1.0);
-    }
-
-    let (community_count, depth, modularity) = if levels > 1 {
-        persist_hierarchical_communities(
-            &db,
-            store,
-            &graph,
-            max_iterations,
-            tolerance,
-            min_size,
-            levels,
-        )?
-    } else {
-        persist_flat_communities(&db, store, &graph, max_iterations, tolerance)?
+    // One clustering path for every surface: the weighted projection,
+    // fingerprinted and replaced as a run (no hardcoded unit weights).
+    let _ = (max_iterations, tolerance);
+    let config = graphrag_core::fingerprints::CommunityConfig {
+        max_levels: levels,
+        min_size_to_split: min_size,
+        ..Default::default()
     };
+    let run = db
+        .build_community_run(store, &config)
+        .map_err(|e| format!("community run: {e}"))?;
+    let (community_count, depth, modularity) = (run.communities, run.levels, run.modularity);
 
     println!(
         "store={store} entities={} relations={} communities={} depth={} modularity={:.6}",
@@ -619,66 +610,6 @@ fn extract_entities_for_chunks<C: ChatClient>(
     }
 
     Ok(extracted)
-}
-
-fn persist_flat_communities(
-    db: &Database,
-    store: &str,
-    graph: &CommunityGraph,
-    max_iterations: usize,
-    tolerance: f64,
-) -> Result<(usize, i32, f64), String> {
-    let result = graph.leiden(Some(max_iterations), tolerance);
-    let mut community_count = 0;
-
-    for community in &result.communities {
-        let community_id = db
-            .create_community(store, 0, result.modularity, None)
-            .map_err(|e| format!("create community: {e}"))?;
-        community_count += 1;
-
-        for entity_id in community.collect_nodes() {
-            db.link_entity_community(entity_id, community_id)
-                .map_err(|e| format!("link entity community: {e}"))?;
-        }
-    }
-
-    Ok((community_count, 1, result.modularity))
-}
-
-fn persist_hierarchical_communities(
-    db: &Database,
-    store: &str,
-    graph: &CommunityGraph,
-    max_iterations: usize,
-    tolerance: f64,
-    min_size: usize,
-    levels: i32,
-) -> Result<(usize, i32, f64), String> {
-    let result = graph.leiden_hierarchical(Some(max_iterations), tolerance, min_size, Some(levels));
-    let mut index_to_db_id: HashMap<usize, i64> = HashMap::new();
-    let top_modularity = result
-        .communities
-        .first()
-        .map(|community| community.modularity)
-        .unwrap_or(0.0);
-
-    for (idx, community) in result.communities.iter().enumerate() {
-        let parent_id = community
-            .parent_index
-            .and_then(|parent_index| index_to_db_id.get(&parent_index).copied());
-        let community_id = db
-            .create_community(store, community.level, community.modularity, parent_id)
-            .map_err(|e| format!("create community: {e}"))?;
-        index_to_db_id.insert(idx, community_id);
-
-        for &entity_id in &community.nodes {
-            db.link_entity_community(entity_id, community_id)
-                .map_err(|e| format!("link entity community: {e}"))?;
-        }
-    }
-
-    Ok((result.communities.len(), result.depth, top_modularity))
 }
 
 fn cmd_export(store: &str) -> Result<(), String> {

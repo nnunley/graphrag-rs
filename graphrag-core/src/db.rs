@@ -972,10 +972,14 @@ impl Database {
 
     // Community operations
 
-    /// Clear existing communities for a store
+    /// Clear existing communities (and community runs) for a store
     pub fn clear_communities(&self, store: &str) -> Result<(), GraphRagError> {
         self.conn
             .execute("DELETE FROM communities WHERE store = ?1", params![store])?;
+        self.conn.execute(
+            "DELETE FROM community_runs WHERE store = ?1",
+            params![store],
+        )?;
         Ok(())
     }
 

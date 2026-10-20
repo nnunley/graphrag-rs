@@ -52,6 +52,7 @@ pub mod assertions;
 pub mod attempts;
 pub mod capsule;
 pub mod capsule_store;
+pub mod community_runs;
 pub mod db;
 pub mod entity_types;
 pub mod error;

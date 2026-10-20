@@ -8,7 +8,7 @@
 //!
 //! Implementation adapted from fa-leiden-cd (MIT licensed).
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 /// A community can be either leaf-level (containing node IDs) or nested (containing sub-communities)
 #[derive(Debug, Clone)]
@@ -20,10 +20,12 @@ pub enum Community {
 }
 
 impl Community {
-    /// Collect all node IDs in this community (recursively)
+    /// Collect all node IDs in this community (recursively), sorted so that
+    /// anything built from them (subgraphs, fingerprints) is deterministic.
     pub fn collect_nodes(&self) -> Vec<i64> {
         let mut nodes = Vec::new();
         self.collect_nodes_into(&mut nodes);
+        nodes.sort_unstable();
         nodes
     }
 
@@ -318,7 +320,7 @@ impl CommunityGraph {
                 }
 
                 // Compute weights to each neighboring community
-                let mut comm_weights: HashMap<usize, f64> = HashMap::new();
+                let mut comm_weights: BTreeMap<usize, f64> = BTreeMap::new();
                 for &(j, w) in &self.neighbors[i] {
                     let comm_j = assignments[j];
                     *comm_weights.entry(comm_j).or_insert(0.0) += w;
@@ -360,14 +362,14 @@ impl CommunityGraph {
 
     /// Phase 2: Refinement - split communities that aren't well-connected
     /// This is the key difference from Louvain
-    fn refine(&self, assignments: &[usize]) -> Vec<HashSet<usize>> {
+    fn refine(&self, assignments: &[usize]) -> Vec<BTreeSet<usize>> {
         // Group nodes by community
-        let mut communities_by_id: HashMap<usize, HashSet<usize>> = HashMap::new();
+        let mut communities_by_id: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
         for (node_idx, &comm) in assignments.iter().enumerate() {
             communities_by_id.entry(comm).or_default().insert(node_idx);
         }
 
-        let mut refined: Vec<HashSet<usize>> = communities_by_id.into_values().collect();
+        let mut refined: Vec<BTreeSet<usize>> = communities_by_id.into_values().collect();
 
         // For each community, check if it's internally connected
         // If not, split into connected components
@@ -381,7 +383,7 @@ impl CommunityGraph {
             }
 
             // BFS to find connected component within this community
-            let mut visited: HashSet<usize> = HashSet::new();
+            let mut visited: BTreeSet<usize> = BTreeSet::new();
             let mut queue: VecDeque<usize> = VecDeque::new();
 
             // Start from first node
@@ -408,7 +410,7 @@ impl CommunityGraph {
             }
 
             // Split: visited nodes stay, unvisited become new community
-            let unvisited: HashSet<usize> = community.difference(&visited).copied().collect();
+            let unvisited: BTreeSet<usize> = community.difference(&visited).copied().collect();
 
             // Update current community to only visited nodes
             refined[i] = visited;
@@ -426,7 +428,7 @@ impl CommunityGraph {
     }
 
     /// Compute modularity from community sets
-    fn compute_modularity_from_sets(&self, communities: &[HashSet<usize>]) -> f64 {
+    fn compute_modularity_from_sets(&self, communities: &[BTreeSet<usize>]) -> f64 {
         let m = self.total_weight;
         if m == 0.0 {
             return 0.0;
@@ -474,7 +476,7 @@ impl CommunityGraph {
     }
 
     /// Build leaf communities from node index sets
-    fn build_leaf_communities(&self, sets: &[HashSet<usize>]) -> Vec<Community> {
+    fn build_leaf_communities(&self, sets: &[BTreeSet<usize>]) -> Vec<Community> {
         sets.iter()
             .map(|indices| {
                 let node_ids: HashSet<i64> = indices.iter().map(|&idx| self.nodes[idx]).collect();
