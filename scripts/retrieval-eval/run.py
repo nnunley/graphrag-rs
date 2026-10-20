@@ -26,10 +26,13 @@ def old_hits(a, q):
     for store in a.old_stores.split(","):
         out = subprocess.run([a.bin, "ask", q, "--top", "10", "--store", store], capture_output=True, text=True,
                              env={**os.environ, "GRAPHRAG_DATA_DIR": a.data_dir})
+        # Hits start with "#N\trrf="; chunk text can span several lines.
         for line in out.stdout.splitlines():
             m = LINE.match(line)
             if m:
                 merged.append((float(m.group(1)), {"source": m.group(2), "content": m.group(3)}))
+            elif merged and not line.startswith("#"):
+                merged[-1][1]["content"] += "\n" + line
     merged.sort(key=lambda x: -x[0])
     return [h for _, h in merged[:10]]
 
