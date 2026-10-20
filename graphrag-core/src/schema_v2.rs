@@ -55,6 +55,8 @@ CREATE TABLE IF NOT EXISTS chunks (
     span_start INTEGER NOT NULL,
     span_end INTEGER NOT NULL CHECK(span_end >= span_start),
     content_fp TEXT NOT NULL,
+    -- 2 = touched by recall, 1 = newly added, 0 = backlog.
+    priority INTEGER NOT NULL DEFAULT 0,
     source TEXT,
     metadata TEXT,
     created_at TEXT DEFAULT (datetime('now'))

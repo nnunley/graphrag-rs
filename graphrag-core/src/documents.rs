@@ -313,8 +313,8 @@ impl Database {
         let section_ids = self.sync_sections(document_id, doc_node, store, content, &sections)?;
         for c in &chunks {
             self.conn().execute(
-                "INSERT INTO chunks (store, document_id, section_id, span_start, span_end, content_fp, source)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO chunks (store, document_id, section_id, span_start, span_end, content_fp, source, priority)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1)",
                 params![
                     store,
                     document_id,
@@ -478,8 +478,8 @@ impl Database {
                 report.kept += 1;
             } else {
                 tx.execute(
-                    "INSERT INTO chunks (store, document_id, section_id, span_start, span_end, content_fp, source)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    "INSERT INTO chunks (store, document_id, section_id, span_start, span_end, content_fp, source, priority)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1)",
                     params![store, document_id, section_id, c.start as i64, c.end as i64, c.content_fp, source],
                 )?;
                 report.added += 1;

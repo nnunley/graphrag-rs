@@ -64,6 +64,7 @@ pub mod paper;
 pub mod query;
 pub(crate) mod schema_v2;
 pub mod sections;
+pub mod status;
 pub mod synonyms;
 pub mod token;
 pub mod vector_source;
