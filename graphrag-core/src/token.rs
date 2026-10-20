@@ -119,7 +119,7 @@ pub fn fingerprint_text(text: &str) -> String {
     format!("sha256:{}", hex_bytes(&digest))
 }
 
-pub(crate) fn fingerprint_parts(parts: &[&[u8]]) -> String {
+pub fn fingerprint_parts(parts: &[&[u8]]) -> String {
     let mut hash = Sha256::new();
     for part in parts {
         hash.update((part.len() as u64).to_be_bytes());
