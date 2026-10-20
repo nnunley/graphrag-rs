@@ -150,3 +150,11 @@ fn spelling_variants_merge() {
     );
     assert_eq!(db.get_entity_by_id(d).unwrap().name, "Leiden algorithm");
 }
+
+#[test]
+fn extracted_mentions_still_fold_into_references() {
+    assert_eq!(
+        normalize_relation("mentions"),
+        RelationMapping::Canonical("references")
+    );
+}

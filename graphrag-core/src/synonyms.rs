@@ -109,7 +109,6 @@ pub const EXTRA_CANONICAL_RELATIONS: &[&str] = &[
     "disjoint_with",
     "links_to",
     "same_as",
-    "mentions",
 ];
 
 /// Get all canonical relation types (synonym targets plus the extras)
