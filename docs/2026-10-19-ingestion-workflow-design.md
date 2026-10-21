@@ -102,7 +102,7 @@ There are three kinds, depending on where an edge comes from.
 |---|---|---|---|---|
 | **Extracted** | `tokio -[used_by]-> moor` | extraction attempts (provenance) | support = number of distinct current attempts that found it | replaced on re-extraction; deleted when support reaches 0 |
 | **Asserted** | `paper.md -[part_of]-> papers`; `note 1802 -[subject]-> let-go` | an `assertions` record: who (actor-prefixed: `human:norman`, `agent:claude`, `agent:migration`, `agent:cli`, `agent:mcp`, matching OKF v0.2 provenance), when, why (optional), and an optional **context** (nullable; reserved for Cyc-style microtheories and context-scoped visibility) | 1 per active assertion | stays until retracted; retraction sets `retracted_at` and keeps the record (the lace decision, 2026-08-16) |
-| **Structural** | `paper.md -[has_part]-> "3 Methods" -[has_part]-> "3.1 GraphRAG Workflow" -[has_part]-> chunk 12` | parsed from the document when it's chunked | 1 | recomputed when the document is re-chunked |
+| **Structural** | `paper.md -[has_part]-> "3 Methods" -[has_part]-> "3.1 GraphRAG Workflow"` (chunks are not nodes; see "Sections are nodes") | parsed from the document when it's chunked | 1 | recomputed when the document is re-chunked |
 | **Derived** | `section -[mentions]-> entity` (and through it, the document) | computed from extraction: an entity was extracted from one of the document's chunks | number of the document's chunks that mention it | recomputed with extraction |
 
 ### Vocabulary
@@ -161,7 +161,8 @@ All fingerprints use the M0 encoding: `sha256:<hex>` from `token::fingerprint_pa
   - SQLite's `substr` counts characters on `TEXT`, so SQL slicing goes through `CAST(substr(CAST(d.content AS BLOB), start + 1, end - start) AS TEXT)`; *builder's call* whether that lives in a view or in Rust.
   - Opening a v1 database converts each existing chunk into a document holding its text and one chunk spanning `0..len`, then rebuilds `chunks` without `content`. Identical texts share one document. Nothing is lost; `migrate v2` then regroups documents.
 - **Sections are nodes** (Norman, 2026-10-19):
-  - Markdown documents are parsed into a section tree from their headings: document `has_part` top-level sections, a section `has_part` its subsections, and a section `has_part` its chunks.
+  - Markdown documents are parsed into a section tree from their headings: document `has_part` top-level sections, and a section `has_part` its subsections.
+  - **Chunks are not graph nodes** (Norman, 2026-10-21, following the paper): as in the GraphRAG paper (§3.1.3–3.1.5), text chunks are evidence for entities and relationships, not nodes; communities are built over the entity graph. A chunk records its section in `chunks.section_id`, and its link to entities is extraction provenance.
   - Each section records its heading text, level, ordinal, heading path (`approval-workflow.md › Load the Workflow`), byte span, and `content_fp`.
   - A document with no headings (most notes) has no sections; its chunks hang off the document directly.
   - **Chunk boundaries never cross a section.** A section that fits in the chunk size is one chunk. A longer one is split with overlap inside that section only. Small adjacent sections are never merged.
