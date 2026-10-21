@@ -2,7 +2,7 @@
 name = "nu_plugin_graphrag"
 version = "0.1.0"
 edition = "2024"
-description = "Nushell plugin for GraphRAG - knowledge graph + HNSW vector search"
+description = "Nushell plugin for graphrag-rs: add to and browse the one-graph memory"
 license = "MIT"
 
 [[bin]]
