@@ -339,7 +339,7 @@ pub fn status(data_dir: &Path, json: bool, sc: &StaticConfig) -> Result<(), Stri
         "GROUP",
         steps
             .iter()
-            .map(|s| format!("{:>14}", s.as_str()))
+            .map(|s| format!("{:>15}", s.as_str()))
             .collect::<String>()
     );
     println!(
@@ -347,7 +347,7 @@ pub fn status(data_dir: &Path, json: bool, sc: &StaticConfig) -> Result<(), Stri
         "",
         steps
             .iter()
-            .map(|_| format!("{:>14}", "cur/stl/mis/fl"))
+            .map(|_| format!("{:>15}", "cur/stl/mis/fl"))
             .collect::<String>()
     );
     for (g, c) in &report.per_group {
@@ -355,7 +355,7 @@ pub fn status(data_dir: &Path, json: bool, sc: &StaticConfig) -> Result<(), Stri
             "{g:<16} {}",
             steps
                 .iter()
-                .map(|s| format!("{:>14}", cell(c, *s)))
+                .map(|s| format!("{:>15}", cell(c, *s)))
                 .collect::<String>()
         );
     }
@@ -364,7 +364,7 @@ pub fn status(data_dir: &Path, json: bool, sc: &StaticConfig) -> Result<(), Stri
         "TOTAL",
         steps
             .iter()
-            .map(|s| format!("{:>14}", cell(&report.total, *s)))
+            .map(|s| format!("{:>15}", cell(&report.total, *s)))
             .collect::<String>()
     );
     let [b0, b1, b2] = report.backlog_by_priority;
