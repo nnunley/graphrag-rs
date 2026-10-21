@@ -51,17 +51,20 @@ Embedding the other 1,411 chunks took 31 min of CPU.
 
 ### Retrieval eval (Task 19A)
 
-132 frozen queries; recall@10 / MRR@10, p50 latency.
+132 frozen queries. 13 of them have anchors that exist only in v1 chunk text
+(12 identifier, 1 paraphrase): those mica/operation docs changed on disk since
+the old ingest, and the migration re-imports the current files. The table
+scores the 119 queries whose anchors exist in both corpora; recall@10 / MRR@10.
 
-| Arm | ALL | known_item | paraphrase | identifier | cross_group | p50 |
-|---|---|---|---|---|---|---|
-| v1 baseline (old binary, per-store, merged) | 0.723 / 0.611 | 0.900 / 0.710 | 0.562 / 0.449 | 0.775 / 0.468 | 0.525 / 0.956 | 4.8 s |
-| v2 after migration, before extraction (all lanes) | 0.697 / 0.637 | 0.950 / 0.831 | 0.719 / 0.497 | 0.525 / 0.403 | 0.500 / 0.942 | 0.96 s |
-| v2, vector lane only | 0.678 / 0.608 | 0.925 / 0.803 | 0.781 / 0.618 | 0.450 / 0.307 | 0.475 / 0.806 | 0.53 s |
-| v2, lexical lane only | 0.564 / 0.569 | 0.900 / 0.751 | 0.500 / 0.407 | 0.300 / 0.300 | 0.525 / 1.000 | 0.63 s |
+| Arm | ALL | known_item | paraphrase | identifier | cross_group |
+|---|---|---|---|---|---|
+| v1 baseline (old binary, per-store, merged) | 0.718 / 0.653 | 0.900 / 0.710 | 0.581 / 0.464 | 0.750 / 0.563 | 0.525 / 0.956 |
+| v2 after migration, before extraction (all lanes) | 0.773 / 0.707 | 0.950 / 0.831 | 0.742 / 0.513 | 0.750 / 0.576 | 0.500 / 0.942 |
+| v2, vector lane only | 0.752 / 0.675 | 0.925 / 0.803 | 0.806 / 0.638 | 0.643 / 0.438 | 0.475 / 0.806 |
+| v2, lexical lane only | 0.626 / 0.631 | 0.900 / 0.751 | 0.516 / 0.420 | 0.429 / 0.429 | 0.525 / 1.000 |
 
-Section-bounded chunking improves known-item and paraphrase recall and
-MRR, and recall is about 5× faster. Identifier recall drops from 0.775 to
-0.525: BM25 over smaller chunks, fused with a vector lane that is weak on
-identifiers. Cross-group recall is unchanged without extraction (the graph
-lane needs entities). Both are re-measured after the rehearsal extraction.
+- Before any extraction, v2 already beats the baseline overall. The gain comes from known-item and paraphrase queries; identifier recall is unchanged.
+- The lexical lane alone is weak on identifiers (0.43). Tokenization of `::`, paths and flags is the likely cause, to check. Fusion makes up for it.
+- Cross-group recall can't improve until extraction feeds the graph lane.
+- Latency isn't compared: the arms ran under different machine load.
+- A `.v2` query set, generated from the migrated corpus, is needed before comparing extraction arms.
