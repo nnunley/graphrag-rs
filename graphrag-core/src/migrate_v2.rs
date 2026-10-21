@@ -43,6 +43,9 @@ pub struct GroupPlan {
     pub from_files: usize,
     pub from_chunk_groups: usize,
     pub single_chunk: usize,
+    /// Documents already in `memory` (written by a v2 binary before the
+    /// migration ran), kept with their groups.
+    pub kept: usize,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -63,6 +66,13 @@ pub struct MigrationPlan {
     pub deletions: DeletionCounts,
     /// `"store: label"` for every source the migration can't place.
     pub unresolved: Vec<String>,
+}
+
+impl MigrationPlan {
+    /// Identity of this plan, so `--apply` can be bound to the one reviewed.
+    pub fn fingerprint(&self) -> String {
+        fingerprint_text(&serde_json::to_string(self).unwrap_or_default())
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -93,7 +103,25 @@ enum Unit {
         source: Option<String>,
         created_at: String,
     },
+    /// A document already in `memory`, re-asserted into its groups.
+    Kept {
+        groups: Vec<String>,
+        text: String,
+        source: Option<String>,
+        doc_key: Option<String>,
+        created_at: String,
+    },
 }
+
+/// `(id, content, source, doc_key, created_at, node_id)` of a document already in `memory`.
+type MemoryDoc = (
+    i64,
+    String,
+    Option<String>,
+    Option<String>,
+    String,
+    Option<i64>,
+);
 
 struct OldChunk {
     store: String,
@@ -150,6 +178,7 @@ fn plan_units(
             created_at: c.created_at.clone(),
         };
         match c.store.as_str() {
+            MEMORY_STORE => {} // already one graph: kept per document below
             "graphrag-paper" | "graphrag-paper-dense" => plan.deletions.paper_chunks += 1,
             "conversations" | "9front-kb" => units.push(single(&c.store)),
             "mica-docs" => {
@@ -218,6 +247,44 @@ fn plan_units(
             other => plan.unresolved.push(format!("{other}: {source}")),
         }
     }
+    // Documents a v2 binary already wrote, in id order (so doc_key
+    // versions are re-added oldest first and stay retired in order).
+    {
+        let rows: Vec<MemoryDoc> = {
+            let mut stmt = db.conn().prepare(
+                "SELECT d.id, d.content, d.source, d.doc_key, COALESCE(d.created_at, ''), d.node_id FROM documents d
+                 WHERE EXISTS (SELECT 1 FROM chunks c WHERE c.document_id = d.id AND c.store = ?1)
+                 ORDER BY d.id",
+            )?;
+            stmt.query_map(params![MEMORY_STORE], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            })?
+            .collect::<Result<_, _>>()?
+        };
+        for (_, text, source, doc_key, created_at, node) in rows {
+            let mut groups = match node {
+                Some(n) => db.groups_of(n)?,
+                None => Vec::new(),
+            };
+            if groups.is_empty() {
+                groups.push("conversations".into());
+            }
+            units.push(Unit::Kept {
+                groups,
+                text,
+                source,
+                doc_key,
+                created_at,
+            });
+        }
+    }
     for (key, mut parts) in assembled {
         parts.sort_by_key(|p| p.0);
         let (group, label) = key.split_once(':').unwrap_or(("operation", key.as_str()));
@@ -242,6 +309,7 @@ fn plan_units(
             Unit::File { group, .. } => (group, |g| &mut g.from_files),
             Unit::Assembled { group, .. } => (group, |g| &mut g.from_chunk_groups),
             Unit::Single { group, .. } => (group, |g| &mut g.single_chunk),
+            Unit::Kept { groups, .. } => (&groups[0], |g| &mut g.kept),
         };
         *field(plan.per_group.entry(group.to_string()).or_default()) += 1;
     }
@@ -269,7 +337,7 @@ pub fn apply_v2_migration(
     sources: &MigrationSources,
 ) -> Result<MigrationReport, GraphRagError> {
     let conn = db.conn();
-    let tx = conn.unchecked_transaction()?;
+    let tx = db.write_tx()?;
     let (units, current) = plan_units(db, sources)?;
     if !current.unresolved.is_empty() {
         return Err(GraphRagError::InvalidInput(format!(
@@ -336,13 +404,19 @@ pub fn apply_v2_migration(
     let profile = ChunkerProfile::default_markdown();
     let mut report = MigrationReport::default();
     for u in &units {
-        let (group, content, source, doc_key, created_at) = match u {
+        let (groups, content, source, doc_key, created_at): (
+            Vec<String>,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = match u {
             Unit::File {
                 group,
                 path,
                 doc_key,
             } => (
-                group,
+                vec![group.clone()],
                 read(path)?,
                 Some(doc_key.clone()),
                 Some(doc_key.clone()),
@@ -352,20 +426,40 @@ pub fn apply_v2_migration(
                 group,
                 label,
                 parts,
-            } => (group, parts.join("\n\n"), Some(label.clone()), None, None),
+            } => (
+                vec![group.clone()],
+                parts.join("\n\n"),
+                Some(label.clone()),
+                None,
+                None,
+            ),
             Unit::Single {
                 group,
                 text,
                 source,
                 created_at,
             } => (
-                group,
+                vec![group.clone()],
                 text.clone(),
                 source.clone(),
                 None,
                 Some(created_at.clone()),
             ),
+            Unit::Kept {
+                groups,
+                text,
+                source,
+                doc_key,
+                created_at,
+            } => (
+                groups.clone(),
+                text.clone(),
+                source.clone(),
+                doc_key.clone(),
+                Some(created_at.clone()),
+            ),
         };
+        let group_refs: Vec<&str> = groups.iter().map(String::as_str).collect();
         if content.trim().is_empty() {
             continue;
         }
@@ -376,7 +470,7 @@ pub fn apply_v2_migration(
             source: source.as_deref(),
             doc_key: doc_key.as_deref(),
             title: None,
-            groups: &[group.as_str()],
+            groups: &group_refs,
             surface: "migration",
             profile: &profile,
         })?;

@@ -352,3 +352,46 @@ fn apply_is_atomic() {
     );
     assert_eq!(before, after);
 }
+
+#[test]
+fn documents_already_in_memory_survive_migration() {
+    let f = fx();
+    f.db.create_store("memory", 3).unwrap();
+    let p = graphrag_core::fingerprints::ChunkerProfile::default_markdown();
+    f.db.add_document(&graphrag_core::documents::AddDocument {
+        store: "memory",
+        content: "a note written by the new binary before migrating",
+        origin: graphrag_core::documents::Origin::Source,
+        source: Some("brain"),
+        doc_key: None,
+        title: None,
+        groups: &["conversations", "papers"],
+        surface: "cli",
+        profile: &p,
+    })
+    .unwrap();
+    let plan = plan_v2(&f.db, &f.sources).unwrap();
+    assert!(plan.unresolved.is_empty(), "{:?}", plan.unresolved);
+    assert_eq!(plan.per_group["conversations"].kept, 1);
+    apply_v2_migration(&f.db, &plan, &f.sources).unwrap();
+    let papers = f.docs_in("papers");
+    assert!(
+        papers.iter().any(|d| d.contains("before migrating")),
+        "{papers:?}"
+    );
+    assert!(
+        f.docs_in("conversations")
+            .iter()
+            .any(|d| d.contains("before migrating"))
+    );
+}
+
+#[test]
+fn plan_fingerprint_changes_with_the_plan() {
+    let f = fx();
+    let a = plan_v2(&f.db, &f.sources).unwrap().fingerprint();
+    assert_eq!(a, plan_v2(&f.db, &f.sources).unwrap().fingerprint());
+    f.db.add_chunk("conversations", "one more note", Some("brain"), None)
+        .unwrap();
+    assert_ne!(a, plan_v2(&f.db, &f.sources).unwrap().fingerprint());
+}

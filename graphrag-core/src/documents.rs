@@ -97,7 +97,7 @@ impl Database {
         let fp = document_fp(req.content);
         // Join an enclosing transaction (the v2 migration) instead of nesting.
         let tx = if self.conn().is_autocommit() {
-            Some(self.conn().unchecked_transaction()?)
+            Some(self.write_tx()?)
         } else {
             None
         };
@@ -131,6 +131,9 @@ impl Database {
                     req.profile,
                 )?;
             }
+            if let Some(key) = req.doc_key {
+                self.reactivate_under_key(document_id, node, req.store, key, &by)?;
+            }
             AddOutcome::Existing {
                 document_id,
                 new_groups,
@@ -141,16 +144,15 @@ impl Database {
                 None => None,
             };
             conn.execute(
-                "INSERT INTO documents (content, content_fp, doc_key, origin, source, title)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO documents (content, content_fp, doc_key, origin, source, title, chunker_kind)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     req.content,
                     fp,
                     req.doc_key,
                     req.origin.as_str(),
                     req.source,
-                    req.title
-                ],
+                    req.title, req.profile.kind],
             )?;
             let document_id = conn.last_insert_rowid();
             let node = self.ensure_document_node(document_id, req.store, &fp)?;
@@ -170,6 +172,8 @@ impl Database {
                 Some(old) => {
                     let old_node = self.document_node(old)?;
                     self.assert_edge(node, "replaces", old_node, &by, None, None)?;
+                    // The retired version keeps its text but stops counting as evidence.
+                    self.remove_chunk_attempts(&self.document_chunks(old)?)?;
                     AddOutcome::Replaced {
                         document_id,
                         replaced: old,
@@ -227,6 +231,28 @@ impl Database {
             .ok_or_else(|| GraphRagError::Other(format!("document {document_id} has no node")))
     }
 
+    /// The chunker a document was cut with (`code` stays `code`), with the
+    /// size and overlap of `base`.
+    pub fn document_chunker(
+        &self,
+        document_id: i64,
+        base: &ChunkerProfile,
+    ) -> Result<ChunkerProfile, GraphRagError> {
+        let kind: String = self.conn().query_row(
+            "SELECT chunker_kind FROM documents WHERE id = ?1",
+            params![document_id],
+            |r| r.get(0),
+        )?;
+        Ok(ChunkerProfile {
+            kind: if kind == "code" {
+                "code"
+            } else {
+                "markdown-sections"
+            },
+            ..base.clone()
+        })
+    }
+
     pub fn document_origin(&self, document_id: i64) -> Result<Origin, GraphRagError> {
         let o: String = self.conn().query_row(
             "SELECT origin FROM documents WHERE id = ?1",
@@ -261,6 +287,45 @@ impl Database {
                 |r| r.get(0),
             )
             .optional()?)
+    }
+
+    /// Re-adding text that was an earlier version under `key` makes it the
+    /// current version again: whatever retired it is retracted, and any other
+    /// current version under the key is retired by it.
+    fn reactivate_under_key(
+        &self,
+        document_id: i64,
+        node: i64,
+        store: &str,
+        key: &str,
+        by: &Asserter,
+    ) -> Result<(), GraphRagError> {
+        let retirers: Vec<i64> = {
+            let mut stmt = self.conn().prepare(
+                "SELECT id FROM assertions WHERE tail_id = ?1 AND relation = 'replaces' AND retracted_at IS NULL",
+            )?;
+            stmt.query_map(params![node], |r| r.get(0))?
+                .collect::<Result<_, _>>()?
+        };
+        for a in retirers {
+            self.retract_edge(a, by)?;
+        }
+        let others: Vec<i64> = {
+            let mut stmt = self.conn().prepare(
+                "SELECT d.id FROM documents d JOIN entities n ON n.id = d.node_id
+                 WHERE d.doc_key = ?2 AND n.store = ?1 AND d.id != ?3
+                   AND NOT EXISTS (SELECT 1 FROM assertions a
+                       WHERE a.tail_id = d.node_id AND a.relation = 'replaces' AND a.retracted_at IS NULL)",
+            )?;
+            stmt.query_map(params![store, key, document_id], |r| r.get(0))?
+                .collect::<Result<_, _>>()?
+        };
+        for other in others {
+            let other_node = self.document_node(other)?;
+            self.assert_edge(node, "replaces", other_node, by, None, None)?;
+            self.remove_chunk_attempts(&self.document_chunks(other)?)?;
+        }
+        Ok(())
     }
 
     /// Document ids in `store` that no active `replaces` assertion retires.
@@ -470,7 +535,7 @@ impl Database {
         document_id: i64,
         profile: &ChunkerProfile,
     ) -> Result<RechunkReport, GraphRagError> {
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         // v1-converted documents have no node yet: take the store from their
         // chunks and create the node on demand.
         let (content, fp, store, source): (String, String, String, Option<String>) = tx.query_row(
@@ -521,6 +586,8 @@ impl Database {
                 report.added += 1;
             }
         }
+        let vanished: Vec<i64> = old.values().flatten().copied().collect();
+        self.remove_chunk_attempts(&vanished)?;
         for id in old.into_values().flatten() {
             tx.execute(
                 "DELETE FROM step_status WHERE subject_kind = 'chunk' AND subject_id = ?1",

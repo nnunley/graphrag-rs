@@ -146,7 +146,7 @@ impl Database {
 
     /// Run schema migrations for existing databases
     fn migrate_schema(&self) -> Result<(), GraphRagError> {
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = self.write_tx()?;
         // Check if communities table has parent_id column
         let has_parent_id: bool = tx.query_row(
             "SELECT COUNT(*) > 0 FROM pragma_table_info('communities') WHERE name = 'parent_id'",
@@ -290,6 +290,16 @@ impl Database {
 
         tx.commit()?;
         Ok(())
+    }
+
+    /// A write transaction that takes the write lock up front (`BEGIN
+    /// IMMEDIATE`), so a second writer makes it wait (busy_timeout) instead
+    /// of failing with SQLITE_BUSY when it upgrades from read to write.
+    pub(crate) fn write_tx(&self) -> Result<rusqlite::Transaction<'_>, GraphRagError> {
+        Ok(rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?)
     }
 
     /// Crate-internal connection access for sibling storage providers.

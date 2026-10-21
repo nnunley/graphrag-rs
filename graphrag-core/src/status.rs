@@ -143,7 +143,10 @@ impl ExpectedFingerprints for StaticConfig {
                     params![id],
                     |r| r.get(0),
                 )?;
-                Some(chunk_plan_fp(&content, &self.chunker))
+                Some(chunk_plan_fp(
+                    &content,
+                    &db.document_chunker(id, &self.chunker)?,
+                ))
             }
             (SubjectKind::Chunk, Step::Embed) => {
                 Some(embed_fp(&db.chunk_text(id)?, &self.embedder_id, self.dim))

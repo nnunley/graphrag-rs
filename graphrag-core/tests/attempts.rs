@@ -491,3 +491,21 @@ fn reextraction_of_unchanged_text_logs_no_use() {
     );
     assert_eq!(f.count("SELECT COUNT(*) FROM uses"), n);
 }
+
+#[test]
+fn implicit_endpoints_do_not_vote_on_type() {
+    let f = fx();
+    let c = f.doc("# A\ntokio\n# B\nx uses tokio\n# C\ny uses tokio\n# D\nz uses tokio\n");
+    f.ok(c[0], "a", vec![ent("Tokio", "library")], vec![]);
+    for (i, who) in ["X", "Y", "Z"].iter().enumerate() {
+        f.ok(
+            c[i + 1],
+            &format!("r{i}"),
+            vec![ent(who, "person")],
+            vec![rel(who, "Tokio", "uses")],
+        );
+    }
+    let t = f.db.get_entity_by_name("memory", "Tokio").unwrap();
+    assert_eq!(t.entity_type.as_deref(), Some("software"));
+    assert_eq!(f.db.canonical_entity_type(t.id).unwrap(), "software");
+}

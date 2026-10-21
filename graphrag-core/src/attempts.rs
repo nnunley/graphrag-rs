@@ -80,7 +80,7 @@ type Instance = (i64, i64, String, String, Option<u8>);
 
 impl Database {
     pub fn commit_attempt(&self, rec: &AttemptRecord<'_>) -> Result<CommitReport, GraphRagError> {
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         let (store, text, document_id, section_id): (String, String, i64, Option<i64>) = tx
             .query_row(
                 "SELECT store, content, document_id, section_id FROM chunk_view WHERE id = ?1",
@@ -289,7 +289,12 @@ impl Database {
                 }
                 report.implicit_endpoints += 1;
                 by_key.insert(key, id);
-                entity_rows.push((id, "other", String::new()));
+                // Linked to the chunk, but no type vote: the model never
+                // declared it, so it must not outvote a declared type.
+                self.conn().execute(
+                    "INSERT OR IGNORE INTO chunk_entities (chunk_id, entity_id) VALUES (?1, ?2)",
+                    params![rec.chunk_id, id],
+                )?;
                 Ok(Some(id))
             };
             let (Some(h), Some(t)) = (endpoint(&r.source)?, endpoint(&r.target)?) else {
@@ -406,56 +411,9 @@ impl Database {
         }
 
         // GC what lost its last support.
-        for rid in &cand_relations {
-            let supported: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM attempt_relations WHERE relation_id = ?1)",
-                params![rid],
-                |r| r.get(0),
-            )?;
-            if supported {
-                continue;
-            }
-            if let Some((h, t)) = tx
-                .query_row(
-                    "SELECT head_id, tail_id FROM relations WHERE id = ?1",
-                    params![rid],
-                    |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
-                )
-                .optional()?
-            {
-                cand_entities.insert(h);
-                cand_entities.insert(t);
-            }
-            tx.execute(
-                "DELETE FROM uses WHERE item_kind = 'relation' AND item_id = ?1",
-                params![rid],
-            )?;
-            report.gc_relations +=
-                tx.execute("DELETE FROM relations WHERE id = ?1", params![rid])?;
-        }
-        for eid in &cand_entities {
-            let keep: bool = tx
-                .query_row(
-                    "SELECT kind != 'entity'
-                     OR EXISTS(SELECT 1 FROM attempt_entities WHERE entity_id = ?1)
-                     OR EXISTS(SELECT 1 FROM relations WHERE head_id = ?1 OR tail_id = ?1)
-                     OR EXISTS(SELECT 1 FROM assertions WHERE head_id = ?1 OR tail_id = ?1)
-                     OR EXISTS(SELECT 1 FROM class_aliases WHERE class_id = ?1)
-                 FROM entities WHERE id = ?1",
-                    params![eid],
-                    |r| r.get(0),
-                )
-                .optional()?
-                .unwrap_or(true);
-            if keep {
-                continue;
-            }
-            tx.execute(
-                "DELETE FROM uses WHERE item_kind IN ('entity','class') AND item_id = ?1",
-                params![eid],
-            )?;
-            report.gc_entities += tx.execute("DELETE FROM entities WHERE id = ?1", params![eid])?;
-        }
+        let (gc_entities, gc_relations) = self.gc_unsupported(cand_entities, cand_relations)?;
+        report.gc_entities = gc_entities;
+        report.gc_relations = gc_relations;
 
         for id in &touched {
             let ty = self.canonical_entity_type(*id)?;
@@ -511,5 +469,111 @@ impl Database {
                 )?
                 .unwrap_or_else(|| "other".into())),
         }
+    }
+}
+
+impl Database {
+    /// Drop the extraction attempts of these chunks (derived data, e.g. for
+    /// chunks a re-chunk removes or a retired document version) and GC what
+    /// lost its last support. The chunks and their text are untouched; their
+    /// extract step becomes work again if they are ever current.
+    pub(crate) fn remove_chunk_attempts(
+        &self,
+        chunk_ids: &[i64],
+    ) -> Result<(usize, usize), GraphRagError> {
+        let conn = self.conn();
+        let mut entities = BTreeSet::new();
+        let mut relations = BTreeSet::new();
+        for c in chunk_ids {
+            let mut stmt = conn.prepare(
+                "SELECT ae.entity_id FROM attempt_entities ae JOIN attempts a ON a.attempt_fp = ae.attempt_fp
+                 WHERE a.chunk_id = ?1",
+            )?;
+            for id in stmt.query_map(params![c], |r| r.get::<_, i64>(0))? {
+                entities.insert(id?);
+            }
+            let mut stmt = conn.prepare(
+                "SELECT ar.relation_id FROM attempt_relations ar JOIN attempts a ON a.attempt_fp = ar.attempt_fp
+                 WHERE a.chunk_id = ?1",
+            )?;
+            for id in stmt.query_map(params![c], |r| r.get::<_, i64>(0))? {
+                relations.insert(id?);
+            }
+            let mut stmt =
+                conn.prepare("SELECT entity_id FROM chunk_entities WHERE chunk_id = ?1")?;
+            for id in stmt.query_map(params![c], |r| r.get::<_, i64>(0))? {
+                entities.insert(id?);
+            }
+            conn.execute("DELETE FROM attempts WHERE chunk_id = ?1", params![c])?;
+            conn.execute("DELETE FROM chunk_entities WHERE chunk_id = ?1", params![c])?;
+            conn.execute(
+                "DELETE FROM step_status WHERE subject_kind = 'chunk' AND subject_id = ?1 AND step = 'extract'",
+                params![c],
+            )?;
+        }
+        self.gc_unsupported(entities, relations)
+    }
+
+    /// Delete candidate relations with no current support, then candidate
+    /// entities with no support, relation, assertion or class alias.
+    /// Returns `(entities removed, relations removed)`.
+    pub(crate) fn gc_unsupported(
+        &self,
+        mut entities: BTreeSet<i64>,
+        relations: BTreeSet<i64>,
+    ) -> Result<(usize, usize), GraphRagError> {
+        let conn = self.conn();
+        let mut gc_relations = 0;
+        for rid in &relations {
+            let supported: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM attempt_relations WHERE relation_id = ?1)",
+                params![rid],
+                |r| r.get(0),
+            )?;
+            if supported {
+                continue;
+            }
+            if let Some((h, t)) = conn
+                .query_row(
+                    "SELECT head_id, tail_id FROM relations WHERE id = ?1",
+                    params![rid],
+                    |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+                )
+                .optional()?
+            {
+                entities.insert(h);
+                entities.insert(t);
+            }
+            conn.execute(
+                "DELETE FROM uses WHERE item_kind = 'relation' AND item_id = ?1",
+                params![rid],
+            )?;
+            gc_relations += conn.execute("DELETE FROM relations WHERE id = ?1", params![rid])?;
+        }
+        let mut gc_entities = 0;
+        for eid in &entities {
+            let keep: bool = conn
+                .query_row(
+                    "SELECT kind != 'entity'
+                         OR EXISTS(SELECT 1 FROM attempt_entities WHERE entity_id = ?1)
+                         OR EXISTS(SELECT 1 FROM relations WHERE head_id = ?1 OR tail_id = ?1)
+                         OR EXISTS(SELECT 1 FROM assertions WHERE head_id = ?1 OR tail_id = ?1)
+                         OR EXISTS(SELECT 1 FROM class_aliases WHERE class_id = ?1)
+                     FROM entities WHERE id = ?1",
+                    params![eid],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .unwrap_or(true);
+            if keep {
+                continue;
+            }
+            conn.execute(
+                "DELETE FROM uses WHERE item_kind IN ('entity','class') AND item_id = ?1",
+                params![eid],
+            )?;
+            gc_entities += conn.execute("DELETE FROM entities WHERE id = ?1", params![eid])?;
+        }
+        Ok((gc_entities, gc_relations))
     }
 }

@@ -102,7 +102,7 @@ impl Database {
             .find(|c| c.level == 0)
             .map_or(0.0, |c| c.modularity);
 
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         tx.execute(
             "INSERT INTO community_runs (store, graph_fp, config_json, seed, modularity, current)
              VALUES (?1, ?2, ?3, ?4, ?5, 0)",

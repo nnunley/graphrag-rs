@@ -208,7 +208,9 @@ fn malformed_three_times_is_failed() {
 }
 
 #[test]
-fn model_not_served_exits_69_writes_nothing() {
+fn model_not_served_exits_69_but_still_embeds() {
+    // Local steps (embed, re-chunk) don't need the LLM: documents stay
+    // searchable while llama.cpp is unreachable. Nothing LLM-derived is written.
     let (_d, cfg) = setup();
     seed(&cfg);
     let mut llm = FakeLlm::new();
@@ -216,10 +218,16 @@ fn model_not_served_exits_69_writes_nothing() {
     let emb = FakeEmbedder::new();
     assert_eq!(run(&cfg, &llm, &emb), ExitStatus::Unavailable);
     assert_eq!(ExitStatus::Unavailable.code(), 69);
-    assert_eq!(emb.calls(), 0);
     assert_eq!(llm.calls(), 0);
-    assert_eq!(count(&cfg, "SELECT COUNT(*) FROM chunk_embeddings"), 0);
     assert_eq!(count(&cfg, "SELECT COUNT(*) FROM attempts"), 0);
+    assert_eq!(
+        count(
+            &cfg,
+            "SELECT COUNT(*) FROM chunks c WHERE NOT EXISTS (SELECT 1 FROM chunk_embeddings e WHERE e.chunk_id = c.id)"
+        ),
+        0,
+        "every chunk embedded anyway"
+    );
 }
 
 #[test]

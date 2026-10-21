@@ -360,3 +360,37 @@ fn compiled_documents_are_not_extracted() {
     assert!(r.is_complete());
     assert_eq!(r.total.missing.get(&Step::Extract), None);
 }
+
+#[test]
+fn code_documents_keep_their_chunker() {
+    let f = fx();
+    let code = ChunkerProfile {
+        kind: "code",
+        ..ChunkerProfile::default_markdown()
+    };
+    let out =
+        f.db.add_document(&AddDocument {
+            store: "memory",
+            content: "# not a heading in shell\necho hi\n",
+            origin: Origin::Source,
+            source: None,
+            doc_key: None,
+            title: None,
+            groups: &[],
+            surface: "mcp",
+            profile: &code,
+        })
+        .unwrap();
+    let id = match out {
+        graphrag_core::documents::AddOutcome::Created { document_id } => document_id,
+        o => panic!("{o:?}"),
+    };
+    assert!(
+        !f.work().contains(&(SubjectKind::Document, id, Step::Chunk)),
+        "a code document is not re-chunked as markdown"
+    );
+    assert_eq!(
+        f.db.document_chunker(id, &f.cfg.chunker).unwrap().kind,
+        "code"
+    );
+}

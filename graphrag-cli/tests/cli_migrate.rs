@@ -58,10 +58,29 @@ fn migrate_v2_plans_then_applies() {
     assert_eq!(plan["per_group"]["papers"]["from_files"], 1);
     assert_eq!(plan["unresolved"].as_array().unwrap().len(), 0);
 
+    // --apply is bound to the reviewed plan by its fingerprint.
     Command::cargo_bin("graphrag")
         .unwrap()
         .env("GRAPHRAG_DATA_DIR", &dir)
         .args(args("--apply"))
+        .assert()
+        .failure();
+    Command::cargo_bin("graphrag")
+        .unwrap()
+        .env("GRAPHRAG_DATA_DIR", &dir)
+        .args(args("--apply"))
+        .args(["--plan-fp", "sha256:0000"])
+        .assert()
+        .failure();
+    let fp = plan["fingerprint"]
+        .as_str()
+        .expect("plan fingerprint")
+        .to_string();
+    Command::cargo_bin("graphrag")
+        .unwrap()
+        .env("GRAPHRAG_DATA_DIR", &dir)
+        .args(args("--apply"))
+        .args(["--plan-fp", &fp])
         .assert()
         .success();
     let db = Database::open(&dir.join("graphrag.db")).unwrap();

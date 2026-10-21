@@ -60,23 +60,21 @@ impl<'a> Driver<'a> {
 
     fn run_inner(&mut self) -> Result<ExitStatus, GraphRagError> {
         // Model pin: nothing runs against a model the endpoint doesn't serve.
-        match self.llm.served_models() {
-            Ok(models) if models.iter().any(|m| m == &self.cfg.model) => {}
-            Ok(models) => {
-                let msg = format!(
-                    "model {} not served (served: {})",
-                    self.cfg.model,
-                    models.join(", ")
-                );
-                eprintln!("{msg}");
-                self.db.set_worker_state("last_llm_error", &msg)?;
-                return Ok(ExitStatus::Unavailable);
-            }
-            Err(e) => {
-                eprintln!("LLM endpoint unavailable: {e}");
-                self.db.set_worker_state("last_llm_error", &e)?;
-                return Ok(ExitStatus::Unavailable);
-            }
+        // Local steps (embed, re-chunk) still run, so documents stay searchable.
+        let pin_error = match self.llm.served_models() {
+            Ok(models) if models.iter().any(|m| m == &self.cfg.model) => None,
+            Ok(models) => Some(format!(
+                "model {} not served (served: {})",
+                self.cfg.model,
+                models.join(", ")
+            )),
+            Err(e) => Some(format!("LLM endpoint unavailable: {e}")),
+        };
+        if let Some(msg) = pin_error {
+            eprintln!("{msg}; running local steps only");
+            self.db.set_worker_state("last_llm_error", &msg)?;
+            self.local_only()?;
+            return Ok(ExitStatus::Unavailable);
         }
         if self.cfg.retry_failed {
             self.db.clear_failed_steps()?;
@@ -118,6 +116,26 @@ impl<'a> Driver<'a> {
         }
     }
 
+    /// Drain only the steps that need no LLM: re-chunk and embed.
+    fn local_only(&mut self) -> Result<(), GraphRagError> {
+        loop {
+            if self.budget_left() == 0 {
+                return Ok(());
+            }
+            let now = self.db.now_utc()?;
+            let items: Vec<WorkItem> = self
+                .db
+                .next_work(&self.sc, &now, self.cfg.concurrency.max(1) * 8)?
+                .into_iter()
+                .filter(|w| w.kind == SubjectKind::Document || w.step == Step::Embed)
+                .collect();
+            if items.is_empty() {
+                return Ok(());
+            }
+            self.dispatch(items)?;
+        }
+    }
+
     fn budget_left(&self) -> usize {
         self.cfg
             .max_items
@@ -133,7 +151,8 @@ impl<'a> Driver<'a> {
             .collect();
         if !docs.is_empty() {
             for w in docs.into_iter().take(self.budget_left()) {
-                self.db.rechunk_document(w.id, &self.cfg.chunker)?;
+                let profile = self.db.document_chunker(w.id, &self.cfg.chunker)?;
+                self.db.rechunk_document(w.id, &profile)?;
                 self.processed += 1;
             }
             return Ok(Outcome::Continue);

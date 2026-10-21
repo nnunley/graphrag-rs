@@ -238,6 +238,11 @@ const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
         "TEXT NOT NULL DEFAULT 'active' CHECK(edge_status IN ('active','dormant','implied'))",
     ),
     ("entities", "name_key", "TEXT"),
+    (
+        "documents",
+        "chunker_kind",
+        "TEXT NOT NULL DEFAULT 'markdown-sections'",
+    ),
     ("relations", "salience", "REAL"),
     (
         "relations",
@@ -309,7 +314,8 @@ fn convert_v1_chunks(conn: &Connection) -> Result<(), GraphRagError> {
     conn.execute_batch("PRAGMA foreign_keys = OFF")?;
     let violations_before = foreign_key_violations(conn)?;
     let result = (|| -> Result<(), GraphRagError> {
-        let tx = conn.unchecked_transaction()?;
+        let tx =
+            rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
         tx.execute_batch(&CHUNKS_V2_DDL.replace("TABLE IF NOT EXISTS chunks", "TABLE chunks_v2"))?;
         let rows: Vec<V1Chunk> = {
             let mut stmt = tx.prepare(

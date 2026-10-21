@@ -236,3 +236,92 @@ fn concurrent_writer_waits_instead_of_failing() {
     assert_eq!(db.list_chunks("s").unwrap().len(), 1);
     assert!(db.get_store("held").is_ok());
 }
+
+/// Hold a write lock on a second connection for `ms`, then commit.
+fn hold_write_lock(
+    path: std::path::PathBuf,
+    ms: u64,
+) -> (std::thread::JoinHandle<()>, Arc<Barrier>) {
+    let barrier = Arc::new(Barrier::new(2));
+    let b = barrier.clone();
+    let h = std::thread::spawn(move || {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("BEGIN IMMEDIATE;").unwrap();
+        conn.execute(
+            "INSERT INTO worker_state (key, value) VALUES ('held', 'x')",
+            [],
+        )
+        .unwrap();
+        b.wait();
+        std::thread::sleep(Duration::from_millis(ms));
+        conn.execute_batch("COMMIT;").unwrap();
+    });
+    (h, barrier)
+}
+
+#[test]
+fn add_document_waits_for_another_writer() {
+    use graphrag_core::documents::{AddDocument, Origin};
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("t.db");
+    let db = Database::open(&path).unwrap();
+    db.create_store("memory", 3).unwrap();
+    // A read on this connection first, as the worker does between writes.
+    let _ = db.list_chunks("memory").unwrap();
+    let (h, barrier) = hold_write_lock(path.clone(), 300);
+    barrier.wait();
+    let p = graphrag_core::fingerprints::ChunkerProfile::default_markdown();
+    db.add_document(&AddDocument {
+        store: "memory",
+        content: "written while another writer held the lock",
+        origin: Origin::Source,
+        source: None,
+        doc_key: None,
+        title: None,
+        groups: &["conversations"],
+        surface: "cli",
+        profile: &p,
+    })
+    .expect("waits for the lock instead of failing with SQLITE_BUSY");
+    h.join().unwrap();
+}
+
+#[test]
+fn commit_attempt_waits_for_another_writer() {
+    use graphrag_core::attempts::{AttemptOutcome, AttemptRecord};
+    use graphrag_core::paper::ExtractionAttemptIdentityParts;
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("t.db");
+    let db = Database::open(&path).unwrap();
+    db.create_store("memory", 3).unwrap();
+    let c = db
+        .add_chunk("memory", "Alice uses GraphRAG.", None, None)
+        .unwrap();
+    let fp = graphrag_core::fingerprints::extract_fp(&ExtractionAttemptIdentityParts {
+        store: "memory",
+        chunk_id: c,
+        chunk_content: "Alice uses GraphRAG.",
+        model: "m",
+        extraction_profile: "p",
+        prompt_version: "v",
+        response_schema_version: "s",
+        glean_max_rounds: 0,
+    })
+    .unwrap();
+    let (h, barrier) = hold_write_lock(path.clone(), 300);
+    barrier.wait();
+    db.commit_attempt(&AttemptRecord {
+        chunk_id: c,
+        attempt_fp: &fp,
+        model: "m",
+        profile: "p",
+        prompt_version: "v",
+        schema_version: "s",
+        glean_max_rounds: 0,
+        raw_response: "{}",
+        outcome: AttemptOutcome::Empty,
+        rejected_entities: 0,
+    })
+    .expect("waits for the lock instead of failing with SQLITE_BUSY");
+    h.join().unwrap();
+}

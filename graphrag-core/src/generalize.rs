@@ -51,47 +51,52 @@ const SINGULAR_EXCEPTIONS: &[&str] = &[
     "virus",
 ];
 
-fn singular(word: &str, in_phrase: bool) -> Option<String> {
-    if word.chars().count() <= 3 || !word.chars().all(char::is_alphabetic) {
-        return None;
-    }
+/// Singular of a plural word, decided on its lowercase form so that every
+/// spelling of a word gets the same answer; the returned text keeps the
+/// word's own case. Char-based throughout (names can be any script).
+fn singular(word: &str) -> Option<String> {
     let lower = word.to_lowercase();
-    if SINGULAR_EXCEPTIONS.contains(&lower.as_str()) {
+    let n = lower.chars().count();
+    if n <= 3
+        || !lower.chars().all(char::is_alphabetic)
+        || SINGULAR_EXCEPTIONS.contains(&lower.as_str())
+    {
         return None;
     }
-    let (stem, last) = word.split_at(word.len() - 1);
-    // Acronym plural: LLMs, APIs.
-    if last == "s" && stem.chars().all(char::is_uppercase) {
-        return Some(stem.to_string());
-    }
-    // A capitalized single word is usually a name (Pandas, Postgres): leave
-    // it. As the head of a phrase ("Knowledge Graphs") it is a common noun.
-    let title_case = word.chars().skip(1).eq(lower.chars().skip(1));
-    if word != lower && !(in_phrase && title_case) {
+    let (drop, add) = if lower.ends_with("ies") && n > 4 {
+        (3, "y")
+    } else if lower.ends_with("sses") || lower.ends_with("xes") || lower.ends_with("shes") {
+        (2, "")
+    } else if lower.ends_with("ss")
+        || lower.ends_with("us")
+        || lower.ends_with("is")
+        || !lower.ends_with('s')
+    {
         return None;
-    }
-    let strip = |n: usize| word[..word.len() - n].to_string();
-    if lower.ends_with("ies") && lower.len() > 4 {
-        return Some(format!("{}y", strip(3)));
-    }
-    if lower.ends_with("sses") || lower.ends_with("xes") || lower.ends_with("shes") {
-        return Some(strip(2));
-    }
-    if lower.ends_with("ss") || lower.ends_with("us") || lower.ends_with("is") {
-        return None;
-    }
-    lower.ends_with('s').then(|| strip(1))
+    } else {
+        (1, "")
+    };
+    let chars: Vec<char> = word.chars().collect();
+    let kept = &chars[..chars.len() - drop];
+    let upper = kept.last().is_some_and(|c| c.is_uppercase());
+    let mut out: String = kept.iter().collect();
+    out.push_str(&if upper {
+        add.to_uppercase()
+    } else {
+        add.to_string()
+    });
+    Some(out)
 }
 
 /// Singularize the head (last) noun: `knowledge graphs` → `knowledge graph`.
 pub fn base_form(name: &str) -> String {
     let name = name.trim();
     match name.rsplit_once(' ') {
-        Some((head, last)) => match singular(last, true) {
+        Some((head, last)) => match singular(last) {
             Some(s) => format!("{head} {s}"),
             None => name.to_string(),
         },
-        None => singular(name, false).unwrap_or_else(|| name.to_string()),
+        None => singular(name).unwrap_or_else(|| name.to_string()),
     }
 }
 
@@ -579,7 +584,7 @@ impl Database {
         }
         let n_total = all_pairs.len() as f64;
 
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         let existing: HashMap<Key, (i64, String, bool)> = {
             let mut stmt = tx.prepare(
                 "SELECT l.relation, l.head_class, l.tail_class, l.id, l.fp, l.admitted FROM lifted_edges l

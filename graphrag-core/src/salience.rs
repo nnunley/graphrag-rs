@@ -153,7 +153,7 @@ impl Database {
         cfg: &SalienceConfig,
         now: &str,
     ) -> Result<SalienceReport, GraphRagError> {
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         let covered = self.covered_relations()?;
         let mut report = SalienceReport::default();
 

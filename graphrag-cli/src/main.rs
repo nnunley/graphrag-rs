@@ -232,6 +232,10 @@ enum MigrateCmd {
         /// Print the plan or report as JSON
         #[arg(long)]
         json: bool,
+        /// With --apply: the fingerprint `--plan` printed; apply refuses if
+        /// the plan changed since you reviewed it
+        #[arg(long)]
+        plan_fp: Option<String>,
     },
 }
 
@@ -666,6 +670,7 @@ fn cmd_migrate_v2(
     dev_root: Option<PathBuf>,
     paper: Option<PathBuf>,
     json: bool,
+    plan_fp: Option<String>,
 ) -> Result<(), String> {
     use graphrag_core::migrate_v2::{MigrationSources, apply_v2_migration, plan_v2};
     if plan_only == apply {
@@ -684,11 +689,14 @@ fn cmd_migrate_v2(
     };
     let db = open_db()?;
     let plan = plan_v2(&db, &sources).map_err(|e| format!("plan: {e}"))?;
+    let fingerprint = plan.fingerprint();
     if plan_only {
         if json {
+            let mut v = serde_json::to_value(&plan).map_err(|e| e.to_string())?;
+            v["fingerprint"] = serde_json::Value::String(fingerprint.clone());
             println!(
                 "{}",
-                serde_json::to_string_pretty(&plan).map_err(|e| e.to_string())?
+                serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?
             );
         } else {
             println!(
@@ -710,8 +718,19 @@ fn cmd_migrate_v2(
             for u in &plan.unresolved {
                 println!("  {u}");
             }
+            println!("\nplan fingerprint: {fingerprint}");
+            println!("apply with: graphrag migrate v2 --apply --plan-fp {fingerprint}");
         }
         return Ok(());
+    }
+    match plan_fp {
+        None => return Err("--apply needs --plan-fp (run --plan first and review it)".into()),
+        Some(fp) if fp != fingerprint => {
+            return Err(format!(
+                "the plan changed since it was reviewed ({fp} != {fingerprint}); run --plan again"
+            ));
+        }
+        Some(_) => {}
     }
     let report = apply_v2_migration(&db, &plan, &sources).map_err(|e| format!("apply: {e}"))?;
     if json {
@@ -846,8 +865,9 @@ fn main() -> ExitCode {
                     dev_root,
                     paper,
                     json,
+                    plan_fp,
                 },
-        } => cmd_migrate_v2(plan, apply, repo_root, dev_root, paper, json),
+        } => cmd_migrate_v2(plan, apply, repo_root, dev_root, paper, json, plan_fp),
         Commands::Enrich { .. } => {
             eprintln!("warning: `enrich` is deprecated; use `graphrag work`");
             return cmd_work(

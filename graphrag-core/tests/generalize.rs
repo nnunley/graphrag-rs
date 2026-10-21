@@ -373,3 +373,31 @@ fn generalize_step_is_recorded() {
         .unwrap();
     assert_eq!(stored, fp);
 }
+
+#[test]
+fn multibyte_names_do_not_panic() {
+    for name in ["café", "知识图谱", "naïves", "Ωmegas", "emoji 🚀s", "Ärzte"] {
+        let _ = base_form(name);
+        let _ = normalize_entity_name(name);
+    }
+    assert_eq!(base_form("cafés"), "café");
+}
+
+#[test]
+fn singularizing_is_case_independent() {
+    for (a, b) in [
+        ("Workflows", "workflow"),
+        ("WORKFLOWS", "workflows"),
+        ("Embeddings", "embedding"),
+        ("Llms", "LLMs"),
+    ] {
+        assert_eq!(
+            normalize_entity_name(a),
+            normalize_entity_name(b),
+            "{a} vs {b}"
+        );
+    }
+    for keep in ["Postgres", "Kubernetes", "Redis", "Pandas", "Jenkins"] {
+        assert_eq!(normalize_entity_name(keep), keep.to_lowercase());
+    }
+}

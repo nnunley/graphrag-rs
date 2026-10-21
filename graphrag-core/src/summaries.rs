@@ -417,7 +417,7 @@ impl Database {
         {
             return Err(SummaryGateError::Ungrounded);
         }
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         tx.execute(
             "INSERT OR REPLACE INTO summaries (community_fp, summary, model, prompt_version) VALUES (?1, ?2, ?3, ?4)",
             params![fp, text, model, SUMMARY_PROMPT_VERSION],

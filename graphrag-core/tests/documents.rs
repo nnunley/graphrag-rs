@@ -268,3 +268,124 @@ fn rechunk_works_for_converted_documents() {
         assert!(f.db.chunk_text(c).unwrap().chars().count() <= 2000);
     }
 }
+
+mod gc {
+    use super::*;
+    use graphrag_core::attempts::{
+        AttemptOutcome, AttemptRecord, ExtractedEntity, ExtractedRelation,
+    };
+    use graphrag_core::fingerprints::extract_fp;
+    use graphrag_core::paper::ExtractionAttemptIdentityParts;
+
+    fn commit(f: &Fx, chunk: i64, names: &[&str]) {
+        let text = f.db.chunk_text(chunk).unwrap();
+        let fp = extract_fp(&ExtractionAttemptIdentityParts {
+            store: "memory",
+            chunk_id: chunk,
+            chunk_content: &text,
+            model: "m",
+            extraction_profile: "p",
+            prompt_version: "v",
+            response_schema_version: "s",
+            glean_max_rounds: 0,
+        })
+        .unwrap();
+        let entities = names
+            .iter()
+            .map(|n| ExtractedEntity {
+                name: n.to_string(),
+                entity_type: "concept".into(),
+                description: String::new(),
+                kind: None,
+                is_class: false,
+                broader: None,
+            })
+            .collect();
+        let relations = names
+            .windows(2)
+            .map(|w| ExtractedRelation {
+                source: w[0].into(),
+                target: w[1].into(),
+                relation: "uses".into(),
+                description: String::new(),
+                strength: None,
+            })
+            .collect();
+        f.db.commit_attempt(&AttemptRecord {
+            chunk_id: chunk,
+            attempt_fp: &fp,
+            model: "m",
+            profile: "p",
+            prompt_version: "v",
+            schema_version: "s",
+            glean_max_rounds: 0,
+            raw_response: &names.join(","),
+            outcome: AttemptOutcome::Ok {
+                entities,
+                relations,
+            },
+            rejected_entities: 0,
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn rechunk_gcs_entities_only_vanished_chunks_supported() {
+        let f = fx();
+        let long: String = (0..600).map(|i| format!("word{i} ")).collect();
+        let d = doc_id(&f.add(&format!("# Long\n{long}\n"), &[], None));
+        let chunks = f.db.document_chunks(d).unwrap();
+        commit(&f, *chunks.last().unwrap(), &["Vanishing", "Ghost"]);
+        let other = ChunkerProfile {
+            overlap: 50,
+            ..f.profile.clone()
+        };
+        f.db.rechunk_document(d, &other).unwrap();
+        assert_eq!(
+            f.count("SELECT COUNT(*) FROM entities WHERE kind = 'entity' AND name IN ('Vanishing', 'Ghost')"),
+            0,
+            "entities supported only by vanished chunks are removed"
+        );
+        assert_eq!(f.count("SELECT COUNT(*) FROM relations"), 0);
+    }
+
+    #[test]
+    fn replaced_version_stops_counting_as_support() {
+        let f = fx();
+        let a = doc_id(&f.add("version one: Tokio uses Mio", &[], Some("a.md")));
+        commit(&f, f.db.document_chunks(a).unwrap()[0], &["Tokio", "Mio"]);
+        let b = doc_id(&f.add("version two: Tokio uses Mio still", &[], Some("a.md")));
+        assert_eq!(
+            f.count("SELECT COUNT(*) FROM relations"),
+            0,
+            "the retired version's extraction is gone"
+        );
+        commit(&f, f.db.document_chunks(b).unwrap()[0], &["Tokio", "Mio"]);
+        let rel: i64 = f
+            .raw()
+            .query_row("SELECT id FROM relations", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(f.db.relation_support(rel).unwrap(), 1);
+        assert_eq!(
+            f.db.chunk_text(f.db.document_chunks(a).unwrap()[0])
+                .unwrap(),
+            "version one: Tokio uses Mio",
+            "old text kept"
+        );
+    }
+
+    #[test]
+    fn re_adding_older_text_reactivates_it() {
+        let f = fx();
+        let a = doc_id(&f.add("text A", &[], Some("f.md")));
+        let b = doc_id(&f.add("text B", &[], Some("f.md")));
+        assert_eq!(f.db.active_documents("memory").unwrap(), vec![b]);
+        let again = doc_id(&f.add("text A", &[], Some("f.md")));
+        assert_eq!(again, a);
+        assert_eq!(
+            f.db.active_documents("memory").unwrap(),
+            vec![a],
+            "A is current again, B retired"
+        );
+    }
+}

@@ -234,7 +234,7 @@ impl Database {
         result: &ExtractResult,
         triples: &[EntityInput],
     ) -> Result<usize, GraphRagError> {
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         let inserted = tx.execute(
             "INSERT INTO extractions
                  (chunk_id, model, triple_count, extracted_at, provenance_nonce, response_sha256)
