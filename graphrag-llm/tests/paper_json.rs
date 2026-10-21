@@ -17,7 +17,7 @@ fn prompt_text(classes: &[String]) -> String {
 #[test]
 fn constants_are_pinned() {
     assert_eq!(PROFILE, "paper-json");
-    assert_eq!(PROMPT_VERSION, "paper-json-v1.2");
+    assert_eq!(PROMPT_VERSION, "paper-json-v1.3");
     assert_eq!(SCHEMA_VERSION, "graph-v1");
     assert_eq!(build_prompt("x", &[], &[]).max_tokens, 12000);
 }
@@ -53,6 +53,8 @@ fn prompt_contains_software_and_example_rules() {
     assert!(t.contains(
         "names that appear only inside code samples or examples (such as #alice) are not entities"
     ));
+    // v1.3: v1.2 lost recall against arm C; the vocabulary must not filter facts out.
+    assert!(t.contains("Recall matters: capture every relationship the text states"));
 }
 
 #[test]

@@ -1,4 +1,4 @@
-//! `paper-json-v1.2`: paper-shaped JSON extraction (entities with
+//! `paper-json-v1.3`: paper-shaped JSON extraction (entities with
 //! descriptions and classes; relationships with descriptions and strength),
 //! enforced with llama.cpp `json_schema`, thinking on. Chosen by the
 //! 2026-10-19 blind spike (arm C) with the judges' fixes applied.
@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 pub const PROFILE: &str = "paper-json";
-pub const PROMPT_VERSION: &str = "paper-json-v1.2";
+pub const PROMPT_VERSION: &str = "paper-json-v1.3";
 pub const SCHEMA_VERSION: &str = "graph-v1";
 /// Thinking uses part of the budget; arm C averaged ~1.2K output tokens.
 pub const MAX_TOKENS: u32 = 12000;
@@ -47,7 +47,7 @@ fn system_prompt(known_classes: &[String]) -> String {
    - broader: the next more general class of kind (\"version control system\" -> \"software tool\"), if one is clear
 2. Identify every pair of entities from step 1 that are clearly related in the text. For each give:
    - source, target: entity names exactly as in step 1
-   - relation: a short snake_case verb phrase; use one of these when it fits: {rels}
+   - relation: a short, specific snake_case verb phrase. When one of these fits, use it: {rels}. When none fits, write your own specific verb phrase; never drop a relationship because no listed relation fits
    - description: why the source and target are related, based only on this text
    - strength: integer 1-10 for how strong and explicit the relationship is in the text
 
@@ -56,6 +56,7 @@ Rules:
 - ignore illustrative example names (e.g. alice, bob, foo) and bibliographic citations; names that appear only inside code samples or examples (such as #alice) are not entities.
 - prefer a specific relation; use associated_with only when nothing else fits.
 - use isa when something is an instance of a kind, genls when one kind is a more specific kind of another.
+- Recall matters: capture every relationship the text states between the entities, including decisions, causes, comparisons and dependencies; include every significant entity even when its class is unclear.
 - Only use information stated in the text. If there are no entities, return empty lists.
 ",
         types = entity_types().join(", "),

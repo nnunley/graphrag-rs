@@ -66,6 +66,8 @@ PROD_ARMS = {
     "V11_small": dict(prompt="shipped", size=1000, overlap=100),
     "V12_prod": dict(prompt="shipped", size=2000, overlap=200),
     "V12_small": dict(prompt="shipped", size=1000, overlap=100),
+    "V13_prod": dict(prompt="shipped", size=2000, overlap=200),
+    "V13_small": dict(prompt="shipped", size=1000, overlap=100),
 }
 
 ARMS = {
