@@ -276,7 +276,7 @@ Core tests go in `graphrag-core/tests/<module>.rs`, one file per new module, ope
   - `re_add_with_new_group_adds_one_edge`;
   - `doc_key_change_creates_replacement` (`Replaced`; old document excluded from `active_documents`; `replaces` assertion exists);
   - `notes_without_key_never_replace` (two different notes, both active);
-  - `sections_become_nodes_with_has_part_edges` (fixture `# A\n## B\ntext` → document `has_part` A, A `has_part` B, B `has_part` chunk);
+  - `sections_become_nodes_with_has_part_edges` (fixture `# A\n## B\ntext` → document `has_part` A, A `has_part` B; chunks are not nodes, the chunk records `section_id` = B);
   - `rechunk_keeps_ids_of_unchanged_chunks` (change the profile overlap; chunks of untouched sections keep ids);
   - `empty_note_is_rejected`;
   - `compiled_origin_is_stored`.
