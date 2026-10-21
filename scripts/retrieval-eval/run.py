@@ -11,9 +11,10 @@ Writes out/<arm>.jsonl with each query's ranked hits and latency.
 import argparse, json, os, re, subprocess, time
 
 def new_hits(a, q):
-    cmd = [a.bin, "ask", q, "--top", "10", "--json"]
+    cmd = [a.bin, "ask", "--top", "10", "--json"]
     if a.lanes:
         cmd += ["--lanes", a.lanes]
+    cmd += ["--", q]  # identifier queries can start with "--"
     out = subprocess.run(cmd, capture_output=True, text=True, env={**os.environ, "GRAPHRAG_DATA_DIR": a.data_dir, "GRAPHRAG_BIN": "/usr/bin/true"})
     if out.returncode != 0:
         raise SystemExit(out.stderr)
@@ -24,7 +25,7 @@ LINE = re.compile(r"^#\d+\trrf=([0-9.]+)\t.*?\t\[([^\]]*)\]\t(.*)$")
 def old_hits(a, q):
     merged = []
     for store in a.old_stores.split(","):
-        out = subprocess.run([a.bin, "ask", q, "--top", "10", "--store", store], capture_output=True, text=True,
+        out = subprocess.run([a.bin, "ask", "--top", "10", "--store", store, "--", q], capture_output=True, text=True,
                              env={**os.environ, "GRAPHRAG_DATA_DIR": a.data_dir})
         # Hits start with "#N\trrf="; chunk text can span several lines.
         for line in out.stdout.splitlines():
